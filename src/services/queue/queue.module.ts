@@ -1,7 +1,16 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { getQueueName } from 'src/utils';
+import { EMAIL_QUEUE, INJESTION_QUEUE, LLM_QUEUE, WEBHOOK_QUEUE } from 'src/config/constants';
+import { IngestionQueue } from './ingestion.queue';
+import { WebhookQueue } from './webhook.queue';
+import { LLMQueue } from './llm.queue';
+import { EmailQueue } from './email.queue';
+import { IngestionProcessor } from './processors/ingestion.processor';
+import { WebhookProcessor } from './processors/webhook.processor';
+import { LLMProcessor } from './processors/llm.processor';
+import { EmailProcessor } from './processors/email.processor';
+
 @Global()
 @Module({
     imports: [
@@ -12,8 +21,8 @@ import { getQueueName } from 'src/utils';
                 const connectionConfig = {
                     host: configService.get<string>('REDIS_HOST'),
                     port: configService.get<number>('REDIS_PORT'),
-                    username: configService.get<string>('REDIS_USER'),
-                    password: configService.get<string>('REDIS_PASSWORD'),
+                    // username: configService.get<string>('REDIS_USER'),
+                    // password: configService.get<string>('REDIS_PASSWORD'),
                     tls: {},
                     retryDelayOnFailover: 100,
                     connectTimeout: 10000,
@@ -59,28 +68,28 @@ import { getQueueName } from 'src/utils';
         // Register queues with individual settings if needed
         BullModule.registerQueue(
             {
-                name: getQueueName("HISTORY"),
+                name: INJESTION_QUEUE,
                 defaultJobOptions: {
                     removeOnComplete: 50,
                     removeOnFail: 20,
                 }
             },
             {
-                name: getQueueName("WEBHOOK"),
+                name: WEBHOOK_QUEUE,
                 defaultJobOptions: {
                     removeOnComplete: 50,
                     removeOnFail: 20,
                 }
             },
             {
-                name: getQueueName("LLM"),
+                name: LLM_QUEUE,
                 defaultJobOptions: {
                     removeOnComplete: 50,
                     removeOnFail: 20,
                 }
             },
             {
-                name: getQueueName("LLM"),
+                name: EMAIL_QUEUE,
                 defaultJobOptions: {
                     removeOnComplete: 50,
                     removeOnFail: 20,
@@ -88,6 +97,17 @@ import { getQueueName } from 'src/utils';
             },
         ),
     ],
-    exports: [BullModule],
+    providers: [
+        IngestionQueue,
+        WebhookQueue,
+        LLMQueue,
+        EmailQueue,
+        IngestionProcessor,
+        WebhookProcessor,
+        LLMProcessor,
+        EmailProcessor
+    ],
+    exports: [BullModule, IngestionQueue, WebhookQueue, LLMQueue, EmailQueue],
+    // exports: [BullModule],
 })
 export class QueueModule { }

@@ -8,20 +8,20 @@ import { REDIS_CLIENT } from 'src/config/constants';
 export const createRedisConnection = (configService: ConfigService): Redis => {
     const host = configService.get<string>('REDIS_HOST');
     const port = configService.get<number>('REDIS_PORT');
-    const username = configService.get<string>('REDIS_USER');
-    const password = configService.get<string>('REDIS_PASSWORD');
+    // const username = configService.get<string>('REDIS_USER');
+    // const password = configService.get<string>('REDIS_PASSWORD');
 
     // console.log({host,  port, username,  password})
 
-    if (!host || !port || !password) {
+    if (!host || !port) {
         throw new Error('Missing Redis connection details in .env file.');
     }
 
     const config = {
         host,
         port,
-        username,
-        password,
+        // username,
+        // password,
         tls: {},
         // Enhanced retry strategy
         retryDelayOnFailover: 100,
