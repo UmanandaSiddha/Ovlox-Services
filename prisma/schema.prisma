@@ -1,14 +1,492 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-	provider = "prisma-client"
-	output   = "../generated/prisma"
+    provider = "prisma-client-js"
 }
 
 datasource db {
-	provider = "postgresql"
+    provider = "postgresql"
+}
+
+/// --- Permission names that can be used to build roles (canonical) ---
+enum PermissionName {
+    MANAGE_ORG // create org settings, billing, etc
+    INVITE_MEMBERS // invite / remove members
+    MANAGE_INTEGRATIONS // connect / disconnect integrations
+    CREATE_PROJECTS
+    EDIT_PROJECTS
+    DELETE_PROJECTS
+    VIEW_PROJECTS
+    MANAGE_ROLES // create / edit custom roles
+    MAP_IDENTITIES // map external identities to users
+    RUN_IMPORTS // start historical imports
+    VIEW_REPORTS
+    MANAGE_TASKS
+    MANAGE_WEBHOOKS
+    EXPORT_DATA
+}
+
+/// --- Predefined role types (platform-level convenience) ---
+enum PredefinedOrgRole {
+    OWNER
+    ADMIN
+    DEVELOPER
+    VIEWER
+    CEO
+    CTO
+}
+
+/// --- Provider canonical names ---
+enum ExternalProvider {
+    GITHUB
+    SLACK
+    DISCORD
+    NOTION
+    JIRA
+}
+
+/// --- Generic enums used earlier ---
+enum UserRole {
+    ADMIN
+    USER
+}
+
+enum Gender {
+    MALE
+    FEMALE
+    OTHER
+}
+
+enum AccountType {
+    GUEST
+    EMAIL
+    PHONE
+    GOOGLE
+}
+
+enum AuthProvider {
+    OTP
+    PASSWORD
+    GOOGLE
+}
+
+enum RawEventType {
+    COMMIT
+    PULL_REQUEST
+    ISSUE
+    MESSAGE
+    TASK_UPDATE
+    DEPLOYMENT
+    ERROR
+    OTHER
+}
+
+enum TaskStatus {
+    TODO
+    IN_PROGRESS
+    REVIEW
+    DONE
+    BLOCKED
+}
+
+/// ------------------ Models ------------------
+
+model User {
+    id               String         @id @default(uuid())
+    email            String?        @unique
+    phoneNumber      String?        @unique
+    firstName        String?
+    lastName         String?
+    password         String?
+    authToken        String?
+    isVerified       Boolean        @default(false)
+    isOnline         Boolean        @default(false)
+    oneTimePassword  String?
+    avatarUrl        String?
+    dateOfBirth      DateTime?
+    lastLogin        DateTime?
+    oneTimeExpire    DateTime?
+    resetToken       String?
+    resetTokenExpire DateTime?
+    accountType      AccountType[]  @default([PHONE])
+    authProvider     AuthProvider[] @default([OTP])
+    role             UserRole       @default(USER)
+    gender           Gender?
+    createdAt        DateTime       @default(now()) @map("created_at")
+    updatedAt        DateTime       @default(now()) @updatedAt @map("updated_at")
+
+    // Relations
+    invalidatedTokens InvalidatedToken[]
+    memberships       OrganizationMember[]
+    invites           Invite[]
+    llmOutputs        LlmOutput[]
+    organizations     Organization[] // organizations owned by this user (owner role)
+    identities        Identity[] // external identities (github/slack/discord)
+    aliases           IdentityAlias[] // nicknames created by owner/admin mapping
+    roleTemplates     RoleTemplate[]
+    contributorMaps   ContributorMap[]
+}
+
+model InvalidatedToken {
+    id            String   @id @default(uuid())
+    refreshToken  String   @unique
+    userId        String
+    invalidatedAt DateTime @default(now())
+    user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Store external identities (one per provider/account)
+model Identity {
+    id             String           @id @default(uuid())
+    provider       ExternalProvider
+    providerUserId String // provider-specific unique id (e.g., github username or id, slack user id)
+    displayName    String? // provider display name
+    avatarUrl      String?
+    rawProfile     Json? // raw provider information (profile)
+    createdAt      DateTime         @default(now())
+
+    // Optional link to a User (owner/admin may map)
+    linkedUserId String?
+    linkedUser   User?   @relation(fields: [linkedUserId], references: [id], onDelete: SetNull)
+
+    // Organization scope (optional — identity could be org-scoped)
+    organizationId  String?
+    organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    identityAlias   IdentityAlias[]
+    contributorMaps ContributorMap[]
+
+    @@index([provider, providerUserId], map: "idx_identity_provider_user")
+}
+
+/// Owner-defined alias / nickname for an identity (for friendly display)
+model IdentityAlias {
+    id          String   @id @default(uuid())
+    identity    Identity @relation(fields: [identityId], references: [id])
+    identityId  String
+    createdById String // owner/admin who created alias
+    createdBy   User     @relation(fields: [createdById], references: [id])
+    alias       String
+    note        String?
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @default(now()) @updatedAt
+
+    @@unique([identityId, alias])
+}
+
+/// Organization
+model Organization {
+    id        String   @id @default(uuid())
+    name      String
+    slug      String   @unique
+    ownerId   String
+    owner     User     @relation(fields: [ownerId], references: [id])
+    plan      String?
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+    // Relations
+    members      OrganizationMember[]
+    projects     Project[]
+    integrations Integration[]
+    invites      Invite[]
+
+    // Custom role templates created by owner/admin: store name + permissions list
+    roleTemplates   RoleTemplate[]
+    identities      Identity[]
+    contributorMaps ContributorMap[]
+    ingestionJobs   IngestionJob[]
+}
+
+/// Organization memberships and role assignment (rolePermissions cached for fast checks)
+model OrganizationMember {
+    id             String             @id @default(uuid())
+    organization   Organization       @relation(fields: [organizationId], references: [id])
+    organizationId String
+    user           User               @relation(fields: [userId], references: [id])
+    userId         String
+    predefinedRole PredefinedOrgRole? // OWNER / ADMIN / DEVELOPER / VIEWER etc (optional)
+    customRoleName String? // if they created a custom role (RoleTemplate.name)
+    permissions    Json? // cached permission list (array of PermissionName strings)
+    status         String             @default("active") // invited, active, suspended
+    invitedBy      String?
+    createdAt      DateTime           @default(now())
+    updatedAt      DateTime           @default(now()) @updatedAt
+
+    // Mapping convenience
+    identityMaps ContributorMap[] // maps provider identities to this member
+    tasks        Task[]
+
+    @@index([organizationId, userId], name: "idx_org_member")
+}
+
+/// Template for custom roles inside org (owner creates)
+model RoleTemplate {
+    id             String           @id @default(uuid())
+    organization   Organization     @relation(fields: [organizationId], references: [id])
+    organizationId String
+    name           String
+    description    String?
+    permissions    PermissionName[] // canonical list of permission enums
+    createdById    String
+    createdBy      User             @relation(fields: [createdById], references: [id])
+    createdAt      DateTime         @default(now())
+    updatedAt      DateTime         @default(now()) @updatedAt
+
+    @@unique([organizationId, name])
+}
+
+/// Invite record
+model Invite {
+    id             String       @id @default(uuid())
+    organization   Organization @relation(fields: [organizationId], references: [id])
+    organizationId String
+    email          String
+    role           String
+    invitedBy      String
+    token          String       @unique
+    status         String       @default("pending")
+    createdAt      DateTime     @default(now())
+    updatedAt      DateTime     @default(now()) @updatedAt
+    user           User?        @relation(fields: [userId], references: [id])
+    userId         String?
+}
+
+/// Project
+model Project {
+    id             String       @id @default(uuid())
+    organization   Organization @relation(fields: [organizationId], references: [id])
+    organizationId String
+    name           String
+    slug           String       @unique
+    description    String?
+    createdBy      String
+    settings       Json?
+    createdAt      DateTime     @default(now()) @map("created_at")
+    updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at")
+
+    integrations  IntegrationConnection[]
+    rawEvents     RawEvent[]
+    llmOutputs    LlmOutput[]
+    tasks         Task[]
+    ingestionJobs IngestionJob[]
+}
+
+/// Integration (per org)
+model Integration {
+    id             String       @id @default(uuid())
+    organization   Organization @relation(fields: [organizationId], references: [id])
+    organizationId String
+    type           String // github, slack, discord, notion, jira...
+    authType       String // oauth, app_jwt, token, service_account
+    config         Json? // provider-specific details (encrypted reference)
+    status         String       @default("connected")
+    createdAt      DateTime     @default(now()) @map("created_at")
+    updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at")
+
+    connections   IntegrationConnection[]
+    rawEvents     RawEvent[]
+    resources     IntegrationResource[] // detected/imported resources (repos, channels)
+    ingestionJobs IngestionJob[]
+}
+
+/// IntegrationConnection binds an Integration to a Project with selected items
+model IntegrationConnection {
+    id            String      @id @default(uuid())
+    project       Project     @relation(fields: [projectId], references: [id])
+    projectId     String
+    integration   Integration @relation(fields: [integrationId], references: [id])
+    integrationId String
+    items         Json? // e.g. { repos: [...], channels: [...], pages: [...] }
+    createdAt     DateTime    @default(now()) @map("created_at")
+    updatedAt     DateTime    @default(now()) @updatedAt @map("updated_at")
+
+    @@index([projectId, integrationId])
+}
+
+/// Resources discovered under an integration (e.g., specific Github repo, slack channel)
+model IntegrationResource {
+    id            String           @id @default(uuid())
+    integration   Integration      @relation(fields: [integrationId], references: [id])
+    integrationId String
+    provider      ExternalProvider
+    providerId    String // unique id from provider (repo full_name, channel id, file id)
+    name          String
+    url           String?
+    metadata      Json? // raw meta like repo settings, channel info
+    imported      Boolean          @default(false) // true after historical import completes
+    createdAt     DateTime         @default(now()) @map("created_at")
+    updatedAt     DateTime         @default(now()) @updatedAt @map("updated_at")
+
+    // If imported to a project, link
+    connectionId String? // optional FK to IntegrationConnection.id (not a relation to avoid cascade complexity)
+
+    @@unique([integrationId, provider, providerId], name: "uq_integration_resource_provider")
+}
+
+/// Map external identity to an OrganizationMember (approved by owner/admin)
+model ContributorMap {
+    id             String             @id @default(uuid())
+    organizationId String
+    organization   Organization       @relation(fields: [organizationId], references: [id])
+    identityId     String
+    identity       Identity           @relation(fields: [identityId], references: [id])
+    memberId       String
+    member         OrganizationMember @relation(fields: [memberId], references: [id])
+    mappedById     String // who created this map (owner/admin)
+    mappedBy       User               @relation(fields: [mappedById], references: [id])
+    createdAt      DateTime           @default(now())
+    updatedAt      DateTime           @default(now()) @updatedAt
+
+    @@unique([organizationId, identityId], name: "uq_contributor_map_org_identity")
+}
+
+/// Task model to mirror Notion/Jira items and track deadlines
+model Task {
+    id          String              @id @default(uuid())
+    project     Project             @relation(fields: [projectId], references: [id])
+    projectId   String
+    provider    ExternalProvider? // optional: source provider
+    providerId  String? // provider-specific task id
+    title       String
+    description String?
+    assigneeId  String? // OrganizationMember id (if assigned)
+    assignee    OrganizationMember? @relation(fields: [assigneeId], references: [id])
+    status      TaskStatus          @default(TODO)
+    priority    Int? // custom priority score
+    dueDate     DateTime?
+    createdAt   DateTime            @default(now())
+    updatedAt   DateTime            @default(now()) @updatedAt
+    metadata    Json?
+    // Keep history of task events in raw events if needed (a RawEvent can be a TASK_UPDATE)
+}
+
+/// Raw events normalized from providers (historical import + webhooks)
+model RawEvent {
+    id               String           @id @default(uuid())
+    project          Project          @relation(fields: [projectId], references: [id])
+    projectId        String
+    integration      Integration      @relation(fields: [integrationId], references: [id])
+    integrationId    String
+    resourceId       String? // IntegrationResource.providerId (repo or channel id) — helps correlate
+    source           ExternalProvider
+    sourceId         String // provider-specific unique id for the event (commit sha, message id, pr id)
+    eventType        RawEventType
+    authorIdentityId String? // Identity.id of the author (if known)
+    authorName       String?
+    authorEmail      String?
+    timestamp        DateTime
+    content          String?
+    metadata         Json? // raw payload or parsed attributes (e.g. diff stat)
+    snapshotUrl      String? // s3 link for large blobs (diff, file snapshots)
+    ingestedAt       DateTime         @default(now())
+    processedByLLM   Boolean          @default(false) // set true after AI generates summary and embeddings
+    processingError  String?
+    codeChanges      CodeChange[]
+    createdAt        DateTime         @default(now()) @map("created_at")
+    updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
+    llmOutputs       LlmOutput[]
+
+    @@index([projectId, source, sourceId], name: "idx_rawevent_src_id")
+}
+
+/// CodeChange for commit-like events (useful for diffs)
+model CodeChange {
+    id            String   @id @default(uuid())
+    rawEvent      RawEvent @relation(fields: [rawEventId], references: [id])
+    rawEventId    String
+    repo          String
+    commitSha     String
+    commitMessage String?
+    diffUrl       String?
+    filesChanged  Int?
+    additions     Int?
+    deletions     Int?
+    complexity    Float?
+    createdAt     DateTime @default(now()) @map("created_at")
+    updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+}
+
+/// LLM outputs & summaries (one per event or aggregated reports)
+model LlmOutput {
+    id          String      @id @default(uuid())
+    project     Project     @relation(fields: [projectId], references: [id])
+    projectId   String
+    rawEventId  String?
+    rawEvent    RawEvent?   @relation(fields: [rawEventId], references: [id])
+    type        String // summary, answer, daily_report, risk_alert, feature_score
+    content     String
+    model       String?
+    prompt      String?
+    createdById String? // user who triggered, or null for system
+    createdBy   User?       @relation(fields: [createdById], references: [id])
+    createdAt   DateTime    @default(now())
+    updatedAt   DateTime    @default(now()) @updatedAt
+    embeddings  Embedding[]
+    metadata    Json? // e.g. score, tags
+}
+
+/// Embedding reference for vector DB
+model Embedding {
+    id          String    @id @default(uuid())
+    llmOutput   LlmOutput @relation(fields: [llmOutputId], references: [id])
+    llmOutputId String
+    vectorRef   String // external vector DB id or pgvector id mapping
+    dimension   Int?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @default(now()) @updatedAt
+}
+
+/// Webhook raw storage and dedupe
+model WebhookEvent {
+    id              String           @id @default(uuid())
+    provider        ExternalProvider
+    providerEventId String? // provider event id header to dedupe if available
+    payload         Json
+    receivedAt      DateTime         @default(now())
+    processed       Boolean          @default(false)
+    processedAt     DateTime?
+    createdAt       DateTime         @default(now()) @map("created_at")
+    updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+
+    @@index([provider, providerEventId], name: "idx_webhook_provider_event")
+}
+
+/// Background import / ingestion job tracking (historical imports)
+model IngestionJob {
+    id             String       @id @default(uuid())
+    organizationId String
+    organization   Organization @relation(fields: [organizationId], references: [id])
+    projectId      String?
+    project        Project?     @relation(fields: [projectId], references: [id])
+    integrationId  String?
+    integration    Integration? @relation(fields: [integrationId], references: [id])
+    resourceId     String? // IntegrationResource.providerId (e.g. repo full name)
+    type           String // historical_import, backfill_embeddings, reprocess_events...
+    status         String       @default("pending") // pending, running, completed, failed
+    progress       Json? // arbitrary progress counters
+    error          String?
+    startedAt      DateTime?
+    finishedAt     DateTime?
+    createdAt      DateTime     @default(now())
+    updatedAt      DateTime     @default(now()) @updatedAt
+}
+
+/// Jobs (generic queue metadata)
+model Job {
+    id        String   @id @default(uuid())
+    type      String
+    payload   Json
+    status    String   @default("pending")
+    attempts  Int      @default(0)
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+}
+
+/// Audit logs
+model AuditLog {
+    id             String   @id @default(uuid())
+    userId         String?
+    organizationId String?
+    action         String
+    meta           Json?
+    createdAt      DateTime @default(now()) @map("created_at")
+    updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
 }
