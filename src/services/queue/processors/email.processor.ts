@@ -1,12 +1,13 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { EMAIL_QUEUE } from 'src/config/constants';
 import { EmailJobPayload } from '../email.queue';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { LoggerService } from 'src/services/logger/logger.service';
 
 @Injectable()
 @Processor(EMAIL_QUEUE)
 export class EmailProcessor extends WorkerHost {
-    private readonly logger = new Logger(EmailProcessor.name);
+    private readonly logger = new LoggerService(EmailProcessor.name);
 
     constructor() {
         super();
@@ -15,7 +16,7 @@ export class EmailProcessor extends WorkerHost {
     async process(job) {
         const data = job.data as EmailJobPayload;
 
-        this.logger.log(`Sending email to ${data.to}`);
+        this.logger.log(`Sending email to ${data.to}`, EmailProcessor.name);
 
         /**
          * TODO: Replace with your mail provider (SendGrid, SES, Resend)
@@ -27,6 +28,6 @@ export class EmailProcessor extends WorkerHost {
 
     @OnWorkerEvent('failed')
     onFailed(job, err) {
-        this.logger.error(`Email job failed: ${job.id}`, err);
+        this.logger.error(`Email job failed: ${job.id} - ${err}`, EmailProcessor.name);
     }
 }

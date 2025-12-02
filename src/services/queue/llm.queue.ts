@@ -13,8 +13,7 @@ export interface LLMJobPayload {
 @Injectable()
 export class LLMQueue {
     constructor(
-        @InjectQueue(LLM_QUEUE)
-        private readonly queue: Queue,
+        @InjectQueue(LLM_QUEUE) private readonly queue: Queue,
     ) { }
 
     async enqueue(job: LLMJobPayload) {

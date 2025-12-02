@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DatabaseService } from 'src/services/database/database.service';
-// If you use Bull/BullMQ, replace below with injected queue
+import { LoggerService } from 'src/services/logger/logger.service';
 
 @Injectable()
 export class JobsService {
-    private readonly logger = new Logger(JobsService.name);
+    private readonly logger = new LoggerService(JobsService.name);
+
     constructor(
         private readonly databaseService: DatabaseService,
     ) { }
@@ -14,7 +15,7 @@ export class JobsService {
         const job = await this.databaseService.job.create({
             data: { type, payload },
         });
-        this.logger.log(`Enqueued job ${job.id} type=${type}`);
+        this.logger.log(`Enqueued job ${job.id} type=${type}`, JobsService.name);
         return job;
     }
 

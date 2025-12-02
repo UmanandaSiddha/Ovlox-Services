@@ -10,7 +10,7 @@ import {
 	LoginDto,
 } from './dto';
 import { DatabaseService } from 'src/services/database/database.service';
-import { User, UserRole, AccountType, Prisma, AuthProvider } from '@prisma/client';
+import { User, AccountType, Prisma, AuthProvider } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from "crypto";
 import { Request, Response } from 'express';

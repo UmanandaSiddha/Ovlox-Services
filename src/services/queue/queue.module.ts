@@ -10,10 +10,12 @@ import { IngestionProcessor } from './processors/ingestion.processor';
 import { WebhookProcessor } from './processors/webhook.processor';
 import { LLMProcessor } from './processors/llm.processor';
 import { EmailProcessor } from './processors/email.processor';
+import { LoggerModule } from '../logger/logger.module';
 
 @Global()
 @Module({
     imports: [
+        LoggerModule,
         BullModule.forRootAsync({
             imports: [ConfigModule],
             inject: [ConfigService],
@@ -64,8 +66,6 @@ import { EmailProcessor } from './processors/email.processor';
                 };
             },
         }),
-
-        // Register queues with individual settings if needed
         BullModule.registerQueue(
             {
                 name: INJESTION_QUEUE,
@@ -108,6 +108,5 @@ import { EmailProcessor } from './processors/email.processor';
         EmailProcessor
     ],
     exports: [BullModule, IngestionQueue, WebhookQueue, LLMQueue, EmailQueue],
-    // exports: [BullModule],
 })
 export class QueueModule { }

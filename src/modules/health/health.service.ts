@@ -1,14 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { Inject } from '@nestjs/common';
 import { EMAIL_QUEUE, INJESTION_QUEUE, LLM_QUEUE, REDIS_CLIENT, WEBHOOK_QUEUE } from 'src/config/constants';
 import Redis from 'ioredis';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { LoggerService } from 'src/services/logger/logger.service';
 
 @Injectable()
 export class RedisHealthService {
-    private readonly logger = new Logger(RedisHealthService.name);
+    private readonly logger = new LoggerService(RedisHealthService.name);
 
     constructor(
         @InjectQueue(INJESTION_QUEUE) private injestionQueue: Queue,
@@ -27,7 +28,7 @@ export class RedisHealthService {
             emailQueue: await this.checkQueueConnection(this.emailQueue, 'Email Queue'),
         };
 
-        this.logger.log('Redis connections status:', results);
+        this.logger.log(`Redis connections status: ${results}`, RedisHealthService.name);
         return results;
     }
 
@@ -171,7 +172,7 @@ export class RedisHealthService {
             const unhealthy = Object.values(results).filter(r => r.status === 'unhealthy');
 
             if (unhealthy.length > 0) {
-                this.logger.error(`${unhealthy.length} Redis connections are unhealthy:`, unhealthy);
+                this.logger.error(`${unhealthy.length} Redis connections are unhealthy: ${unhealthy}`, RedisHealthService.name);
             }
         } catch (error) {
             this.logger.error('Health check failed:', error);

@@ -11,6 +11,12 @@ import { RedisModule } from './services/redis/redis.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UserModule } from './modules/users/users.module';
 import { DatabaseModule } from './services/database/database.module';
+import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { ProjectsModule } from './modules/projects/projects.module';
+import { LlmModule } from './modules/llm/llm.module';
+import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { JobsModule } from './modules/jobs/jobs.module';
+import { IntegrationsModule } from './modules/integrations/integrations.module';
 
 @Module({
 	imports: [
@@ -25,6 +31,12 @@ import { DatabaseModule } from './services/database/database.module';
 		AuthModule,
 		UserModule,
 		DatabaseModule,
+		OrganizationsModule,
+		ProjectsModule,
+		LlmModule,
+		WebhooksModule,
+		JobsModule,
+		IntegrationsModule
 	],
 	controllers: [AppController],
 	providers: [AppService, AppGateway],

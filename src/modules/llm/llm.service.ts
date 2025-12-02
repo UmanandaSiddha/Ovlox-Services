@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from 'src/services/database/database.service';
+import { LoggerService } from 'src/services/logger/logger.service';
 
 /**
  * This service contains stubs for:
@@ -13,7 +14,7 @@ import { DatabaseService } from 'src/services/database/database.service';
 
 @Injectable()
 export class LlmService {
-    private readonly logger = new Logger(LlmService.name);
+    private readonly logger = new LoggerService(LlmService.name);
     private openaiKey: string;
 
     constructor(

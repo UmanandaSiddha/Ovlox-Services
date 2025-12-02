@@ -1,13 +1,14 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { LLM_QUEUE } from 'src/config/constants';
 import { LLMJobPayload } from '../llm.queue';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { DatabaseService } from 'src/services/database/database.service';
+import { LoggerService } from 'src/services/logger/logger.service';
 
 @Injectable()
 @Processor(LLM_QUEUE)
 export class LLMProcessor extends WorkerHost {
-    private readonly logger = new Logger(LLMProcessor.name);
+    private readonly logger = new LoggerService(LLMProcessor.name);
 
     constructor(
         private databaseService: DatabaseService,
@@ -18,7 +19,7 @@ export class LLMProcessor extends WorkerHost {
     async process(job) {
         const data = job.data as LLMJobPayload;
 
-        this.logger.log(`Processing LLM task mode=${data.mode}`);
+        this.logger.log(`Processing LLM task mode=${data.mode}`, LLMProcessor.name);
 
         if (data.mode === 'summary') {
             return this.processSummary(data.rawEventId);
@@ -76,6 +77,6 @@ export class LLMProcessor extends WorkerHost {
 
     @OnWorkerEvent('failed')
     onFailed(job, err) {
-        this.logger.error(`LLM job failed: ${job.id}`, err);
+        this.logger.error(`LLM job failed: ${job.id} - ${err}`, LLMProcessor.name);
     }
 }

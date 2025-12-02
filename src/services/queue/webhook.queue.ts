@@ -13,8 +13,7 @@ export interface WebhookJobPayload {
 @Injectable()
 export class WebhookQueue {
     constructor(
-        @InjectQueue(WEBHOOK_QUEUE)
-        private readonly queue: Queue,
+        @InjectQueue(WEBHOOK_QUEUE) private readonly queue: Queue,
     ) { }
 
     async enqueue(job: WebhookJobPayload) {

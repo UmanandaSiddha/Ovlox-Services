@@ -13,8 +13,7 @@ export interface IngestionJobPayload {
 @Injectable()
 export class IngestionQueue {
     constructor(
-        @InjectQueue(INJESTION_QUEUE)
-        private readonly queue: Queue,
+        @InjectQueue(INJESTION_QUEUE) private readonly queue: Queue,
     ) { }
 
     async enqueue(job: IngestionJobPayload) {

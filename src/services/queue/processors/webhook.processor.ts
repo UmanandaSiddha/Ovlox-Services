@@ -5,11 +5,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { LLMQueue } from '../llm.queue';
 import { DatabaseService } from 'src/services/database/database.service';
 import { ExternalProvider } from '@prisma/client';
+import { LoggerService } from 'src/services/logger/logger.service';
 
 @Injectable()
 @Processor(WEBHOOK_QUEUE)
 export class WebhookProcessor extends WorkerHost {
-    private readonly logger = new Logger(WebhookProcessor.name);
+    private readonly logger = new LoggerService(WebhookProcessor.name);
 
     constructor(
         private databaseService: DatabaseService,
@@ -21,7 +22,7 @@ export class WebhookProcessor extends WorkerHost {
     async process(job) {
         const data = job.data as WebhookJobPayload;
 
-        this.logger.log(`Processing ${data.provider} webhook event`);
+        this.logger.log(`Processing ${data.provider} webhook event`, WebhookProcessor.name);
 
         /**
          * TODO: Validate signatures
@@ -55,9 +56,8 @@ export class WebhookProcessor extends WorkerHost {
 
         return true;
     }
-
     @OnWorkerEvent('failed')
     onFailed(job, error) {
-        this.logger.error(`Webhook job failed: ${job.id}`, error);
+        this.logger.error(`Webhook job failed: ${job.id} - ${error}`, WebhookProcessor.name);
     }
 }

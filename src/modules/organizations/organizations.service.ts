@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { PredefinedOrgRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { DatabaseService } from 'src/services/database/database.service';
 
@@ -41,7 +42,7 @@ export class OrganizationsService {
             data: {
                 organizationId: invite.organizationId,
                 userId,
-                role: invite.role,
+                predefinedRole: invite.role as PredefinedOrgRole,
                 status: 'active',
             },
         });
