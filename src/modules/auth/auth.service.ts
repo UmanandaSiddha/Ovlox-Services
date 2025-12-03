@@ -16,7 +16,6 @@ import * as crypto from "crypto";
 import { Request, Response } from 'express';
 import { RequestDto } from './dto/request.dto';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
 import { JwtService } from '@nestjs/jwt';
 
 @Injectable()
@@ -227,7 +226,11 @@ export class AuthService {
 		}
 
 		const user = await this.databaseService.user.findFirst({
-			where: whereClause,
+			// where: whereClause,
+			where: {
+				phoneNumber,
+				email,
+			}
 		});
 		if (!user) throw new BadRequestException('Invalid OTP or expired');
 
@@ -239,7 +242,11 @@ export class AuthService {
 
 		const updatedUser = await this.databaseService.user.update({
 			where: { id: user.id },
-			data: payload
+			data: {
+				isVerified: true,
+				oneTimePassword: null,
+				oneTimeExpire: null,
+			}
 		});
 
 		const accessToken = await this.generateToken(updatedUser, "ACCESS_TOKEN");

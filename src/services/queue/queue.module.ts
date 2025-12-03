@@ -11,25 +11,25 @@ import { WebhookProcessor } from './processors/webhook.processor';
 import { LLMProcessor } from './processors/llm.processor';
 import { EmailProcessor } from './processors/email.processor';
 import { LoggerModule } from '../logger/logger.module';
+import { DatabaseModule } from '../database/database.module';
+import { ConnectionOptions } from 'bullmq';
 
 @Global()
 @Module({
     imports: [
         LoggerModule,
+        DatabaseModule,
         BullModule.forRootAsync({
             imports: [ConfigModule],
             inject: [ConfigService],
             useFactory: (configService: ConfigService) => {
-                const connectionConfig = {
+                const connectionConfig: ConnectionOptions = {
                     host: configService.get<string>('REDIS_HOST'),
                     port: configService.get<number>('REDIS_PORT'),
-                    // username: configService.get<string>('REDIS_USER'),
-                    // password: configService.get<string>('REDIS_PASSWORD'),
-                    tls: {},
                     retryDelayOnFailover: 100,
                     connectTimeout: 10000,
                     lazyConnect: false,
-                    maxRetriesPerRequest: null, // BullMQ requires this to be null
+                    maxRetriesPerRequest: null,
                     retryStrategy: (times: number) => {
                         const delay = Math.min(times * 2000, 30000);
                         console.log(`BullMQ Redis retry attempt ${times}, delay: ${delay}ms`);

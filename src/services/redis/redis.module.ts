@@ -1,42 +1,31 @@
 import { Global, Module } from '@nestjs/common';
 import { RedisService } from './redis.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import Redis from 'ioredis';
+import Redis, { RedisOptions } from 'ioredis';
 import { REDIS_CLIENT } from 'src/config/constants';
 
-// Create a shared Redis configuration function
 export const createRedisConnection = (configService: ConfigService): Redis => {
     const host = configService.get<string>('REDIS_HOST');
     const port = configService.get<number>('REDIS_PORT');
-    // const username = configService.get<string>('REDIS_USER');
-    // const password = configService.get<string>('REDIS_PASSWORD');
-
-    // console.log({host,  port, username,  password})
 
     if (!host || !port) {
         throw new Error('Missing Redis connection details in .env file.');
     }
 
-    const config = {
+    const config: RedisOptions = {
         host,
         port,
-        // username,
-        // password,
-        tls: {},
-        // Enhanced retry strategy
-        retryDelayOnFailover: 100,
+        // retryDelayOnFailover: 100,
         connectTimeout: 10000,
         lazyConnect: false,
-        maxRetriesPerRequest: 3, // Keep this for your regular Redis operations
+        maxRetriesPerRequest: 3,
         retryStrategy: (times: number) => {
             const delay = Math.min(times * 2000, 30000);
             console.log(`Redis retry attempt ${times}, delay: ${delay}ms`);
             return delay;
         },
-        // Connection pool settings
         enableReadyCheck: true,
         keepAlive: 30000,
-        // Add proper error handling
         reconnectOnError: (err: Error) => {
             const targetErrors = [
                 'READONLY',
@@ -57,10 +46,7 @@ export const createRedisConnection = (configService: ConfigService): Redis => {
     client.on('ready', () => console.log('Redis is ready for commands'));
     client.on('end', () => console.warn('Redis connection closed. Attempting to reconnect...'));
     client.on('reconnecting', (ms: number) => console.log(`Redis reconnecting in ${ms}ms...`));
-    client.on('error', (err) => {
-        console.error('Redis Client Error:', err.message);
-        // Don't throw here, let the retry strategy handle it
-    });
+    client.on('error', (err) => console.error('Redis Client Error:', err.message));
 
     return client;
 };
