@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { JobStatus } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { LoggerService } from 'src/services/logger/logger.service';
 
@@ -21,10 +22,10 @@ export class JobsService {
 
     // implement a poller (outside of request flow) that fetches pending jobs and processes them
     async fetchPending(limit = 10) {
-        return this.databaseService.job.findMany({ where: { status: 'pending' }, take: limit });
+        return this.databaseService.job.findMany({ where: { status: JobStatus.PENDING }, take: limit });
     }
 
     async markDone(id: string) {
-        return this.databaseService.job.update({ where: { id }, data: { status: 'done' } });
+        return this.databaseService.job.update({ where: { id }, data: { status: JobStatus.COMPLETED } });
     }
 }

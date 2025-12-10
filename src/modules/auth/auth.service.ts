@@ -1,5 +1,6 @@
 import {
 	BadRequestException,
+	ForbiddenException,
 	Injectable,
 	NotFoundException,
 	UnauthorizedException,
@@ -10,13 +11,13 @@ import {
 	LoginDto,
 } from './dto';
 import { DatabaseService } from 'src/services/database/database.service';
-import { User, AccountType, Prisma, AuthProvider } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from "crypto";
 import { Request, Response } from 'express';
 import { RequestDto } from './dto/request.dto';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { AccountType, AuthProvider, Prisma, User } from 'generated/prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -29,19 +30,11 @@ export class AuthService {
 
 	// --- Helper Functions ---
 
-	// Reusable contact condition builder
-	private buildContactConditions(phone?: string, email?: string) {
-		return [
-			...(phone ? [{ phoneNumber: phone }] : []),
-			...(email ? [{ email }] : [])
-		];
-	}
-
 	// Verify user by token
 	async validateUserByToken(token: string): Promise<User> {
 		try {
 			const secret = this.config.get<string>('ACCESS_TOKEN_SECRET');
-			const payload: { id: string } = this.jwtService.verify(token, { secret });
+			const payload: { id: string } = await this.jwtService.verifyAsync(token, { secret });
 			const user = await this.databaseService.user.findUnique({ where: { id: payload.id } });
 			if (!user) {
 				throw new UnauthorizedException('Invalid user.');
@@ -57,13 +50,15 @@ export class AuthService {
 	}
 
 	// Generate JWT Token
-	async generateToken(user: User, type: "ACCESS_TOKEN" | "REFRESH_TOKEN"): Promise<string> {
+	async generateToken(userId: string, type: "ACCESS_TOKEN" | "REFRESH_TOKEN", sessionId: string | null): Promise<string> {
 		const secret = type === "ACCESS_TOKEN"
 			? process.env.ACCESS_TOKEN_SECRET
 			: process.env.REFRESH_TOKEN_SECRET;
 		const expiresIn = type === "ACCESS_TOKEN" ? "15m" : "7d";
 
-		return this.jwtService.sign({ id: user.id }, { secret, expiresIn });
+		const payload = type === "ACCESS_TOKEN" ? { id: userId } : { id: userId, sessionId: sessionId }
+
+		return this.jwtService.sign(payload, { secret, expiresIn });
 	}
 
 	// Generate 6 digit OTP
@@ -168,13 +163,7 @@ export class AuthService {
 		}) : null;
 		const user = userByEmail || userByPhone;
 
-		if (user) {
-			if (user.isVerified) {
-				throw new BadRequestException('User already exists !!');
-			} else {
-				await this.databaseService.user.delete({ where: { id: user.id } });
-			}
-		}
+		if (user) throw new BadRequestException('User already exists !!');
 
 		const hashedPassword = await bcrypt.hash(password, 10);
 		const { otpString, otpToken, otpExpire } = await this.generateOTP();
@@ -186,15 +175,35 @@ export class AuthService {
 				password: hashedPassword,
 				phoneNumber,
 				email,
-				authProvider: [AuthProvider.PASSWORD],
-				accountType: email ? [AccountType.EMAIL] : [AccountType.PHONE],
+				authIdentities: {
+					create: {
+						provider: AuthProvider.PASSWORD,
+						providerId: email || phoneNumber,
+						type: AccountType.EMAIL
+					}
+				},
 				oneTimePassword: otpToken,
 				oneTimeExpire: new Date(otpExpire)
 			},
 		});
 
-		const accessToken = await this.generateToken(newUser, "ACCESS_TOKEN");
-		const refreshToken = await this.generateToken(newUser, "REFRESH_TOKEN");
+		const session = await this.databaseService.session.create({
+			data: {
+				userId: user.id,
+				refreshToken: "",
+				expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+			},
+		});
+
+		const accessToken = await this.generateToken(newUser.id, "ACCESS_TOKEN", null);
+		const refreshToken = await this.generateToken(newUser.id, "REFRESH_TOKEN", session.id);
+
+		const hashedToken = await bcrypt.hash(refreshToken, 10);
+
+		await this.databaseService.session.update({
+			where: { id: session.id },
+			data: { refreshToken: hashedToken },
+		});
 
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
 		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
@@ -226,11 +235,7 @@ export class AuthService {
 		}
 
 		const user = await this.databaseService.user.findFirst({
-			// where: whereClause,
-			where: {
-				phoneNumber,
-				email,
-			}
+			where: whereClause,
 		});
 		if (!user) throw new BadRequestException('Invalid OTP or expired');
 
@@ -242,15 +247,26 @@ export class AuthService {
 
 		const updatedUser = await this.databaseService.user.update({
 			where: { id: user.id },
-			data: {
-				isVerified: true,
-				oneTimePassword: null,
-				oneTimeExpire: null,
-			}
+			data: payload
 		});
 
-		const accessToken = await this.generateToken(updatedUser, "ACCESS_TOKEN");
-		const refreshToken = await this.generateToken(updatedUser, "REFRESH_TOKEN");
+		const session = await this.databaseService.session.create({
+			data: {
+				userId: user.id,
+				refreshToken: "",
+				expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+			},
+		});
+
+		const accessToken = await this.generateToken(updatedUser.id, "ACCESS_TOKEN", null);
+		const refreshToken = await this.generateToken(updatedUser.id, "REFRESH_TOKEN", session.id);
+
+		const hashedToken = await bcrypt.hash(refreshToken, 10);
+
+		await this.databaseService.session.update({
+			where: { id: session.id },
+			data: { refreshToken: hashedToken },
+		});
 
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
 		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
@@ -262,12 +278,7 @@ export class AuthService {
 		const token = req.cookies?.['refreshToken'] || req.headers.authorization?.split(' ')?.[1];
 		if (!token) throw new NotFoundException('Refresh token not found!!');
 
-		const invalidToken = await this.databaseService.invalidatedToken.findFirst({
-			where: { refreshToken: token },
-		});
-		if (invalidToken) throw new UnauthorizedException('Invalid refresh token!!');
-
-		const decoded = this.jwtService.verify(token, { secret: process.env.REFRESH_TOKEN_SECRET });
+		const decoded = await this.jwtService.verifyAsync(token, { secret: process.env.REFRESH_TOKEN_SECRET });
 		if (!decoded) throw new UnauthorizedException('Invalid refresh token!!');
 
 		const user = await this.databaseService.user.findUnique({
@@ -275,7 +286,22 @@ export class AuthService {
 		});
 		if (!user) throw new UnauthorizedException('Invalid refresh token!!');
 
-		const accessToken = await this.generateToken(user, "ACCESS_TOKEN");
+		const session = await this.databaseService.session.findUnique({
+			where: { id: decoded.sessionId },
+		});
+		if (!session) throw new ForbiddenException('Session expired');
+
+		if (session.expiresAt <= new Date(Date.now())) {
+			await this.databaseService.session.delete({
+				where: { id: session.id }
+			});
+			throw new ForbiddenException('Session expired');
+		}
+
+		const valid = await bcrypt.compare(token, session.refreshToken);
+		if (!valid) throw new ForbiddenException('Invalid session');
+
+		const accessToken = await this.generateToken(user.id, "ACCESS_TOKEN", null);
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
 
 		return { message: 'User token refreshed successfully!!', accessToken };
@@ -298,8 +324,23 @@ export class AuthService {
 		const isPasswordValid = await bcrypt.compare(password, user.password);
 		if (!isPasswordValid) throw new BadRequestException('Invalid credentials!!');
 
-		const accessToken = await this.generateToken(user, "ACCESS_TOKEN");
-		const refreshToken = await this.generateToken(user, "REFRESH_TOKEN");
+		const session = await this.databaseService.session.create({
+			data: {
+				userId: user.id,
+				refreshToken: "",
+				expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+			},
+		});
+
+		const accessToken = await this.generateToken(user.id, "ACCESS_TOKEN", null);
+		const refreshToken = await this.generateToken(user.id, "REFRESH_TOKEN", session.id);
+
+		const hashedToken = await bcrypt.hash(refreshToken, 10);
+
+		await this.databaseService.session.update({
+			where: { id: session.id },
+			data: { refreshToken: hashedToken },
+		});
 
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
 		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
@@ -311,10 +352,11 @@ export class AuthService {
 		const refreshToken = req.cookies.refreshToken;
 
 		if (refreshToken) {
-			await this.databaseService.invalidatedToken.upsert({
+			const session = await this.databaseService.session.findFirst({
 				where: { refreshToken },
-				update: {},
-				create: { refreshToken, userId },
+			});
+			await this.databaseService.session.delete({
+				where: { id: session.id }
 			});
 		}
 

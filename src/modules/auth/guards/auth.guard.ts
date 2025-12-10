@@ -6,10 +6,10 @@ import {
 	createParamDecorator,
 } from '@nestjs/common';
 import { Request } from 'express';
-import { User } from '@prisma/client';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../decorator/public.decorator';
 import { AuthService } from '../auth.service';
+import { User } from 'generated/prisma/client';
 
 interface AuthenticatedRequest extends Request {
 	user?: User;

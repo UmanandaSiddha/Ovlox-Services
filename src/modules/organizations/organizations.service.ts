@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PredefinedOrgRole } from '@prisma/client';
+import { InviteStatus } from 'generated/prisma/enums';
 import { nanoid } from 'nanoid';
 import { DatabaseService } from 'src/services/database/database.service';
 
@@ -26,7 +27,7 @@ export class OrganizationsService {
             data: {
                 organizationId: orgId,
                 email,
-                role,
+                // role,
                 invitedBy,
                 token,
             },
@@ -36,18 +37,18 @@ export class OrganizationsService {
     async acceptInvite(token: string, userId: string) {
         const invite = await this.databaseService.invite.findUnique({ where: { token } });
         if (!invite) throw new Error('Invalid invite');
-        if (invite.status !== 'pending') throw new Error('Invite not pending');
+        if (invite.status !== InviteStatus.PENDING) throw new Error('Invite not pending');
 
         const member = await this.databaseService.organizationMember.create({
             data: {
                 organizationId: invite.organizationId,
                 userId,
-                predefinedRole: invite.role as PredefinedOrgRole,
-                status: 'active',
+                // predefinedRole: invite.role as PredefinedOrgRole,
+                // status: 'active',
             },
         });
 
-        await this.databaseService.invite.update({ where: { id: invite.id }, data: { status: 'accepted', userId } });
+        await this.databaseService.invite.update({ where: { id: invite.id }, data: { status: InviteStatus.PENDING, userId } });
         return member;
     }
 

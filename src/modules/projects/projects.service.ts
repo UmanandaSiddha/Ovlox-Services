@@ -11,11 +11,15 @@ export class ProjectsService {
         const slug = projectDto.name.toLowerCase().replace(/[^\w]+/g, '-').slice(0, 50);
         return this.databaseService.project.create({
             data: {
-                organizationId: projectDto.organizationId,
+                organization: {
+                    connect: { id: projectDto.organizationId }
+                },
                 name: projectDto.name,
                 slug,
                 description: projectDto.description,
-                createdBy: projectDto.createdBy,
+                createdBy: {
+                    connect: { id: projectDto.createdBy }
+                },
             },
         });
     }

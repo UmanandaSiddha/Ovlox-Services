@@ -1,4 +1,4 @@
-import { Controller, Post, Req, Param, Body, Headers } from '@nestjs/common';
+import { Controller, Post, Param, Body, Headers } from '@nestjs/common';
 import { JobsService } from '../jobs/jobs.service';
 
 @Controller('webhooks')

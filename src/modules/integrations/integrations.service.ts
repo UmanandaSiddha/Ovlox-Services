@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ExternalProvider } from '@prisma/client';
+import { ExternalProvider, IntegrationAuthType } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 
 @Injectable()
@@ -8,9 +8,9 @@ export class IntegrationsService {
         private readonly databaseService: DatabaseService,
     ) { }
 
-    async create(orgId: string, type: ExternalProvider, authType: string, config: any) {
+    async create(orgId: string, type: ExternalProvider, authType: IntegrationAuthType, config: any) {
         return this.databaseService.integration.create({
-            data: { organizationId: orgId, type, authType, config },
+            data: { organization: { connect: { id: orgId } }, type, authType, config },
         });
     }
 

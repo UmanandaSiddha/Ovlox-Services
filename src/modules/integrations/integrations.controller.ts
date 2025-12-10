@@ -1,7 +1,7 @@
 import { Controller, Post, Body, UseGuards, Req, Get, Param } from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
 import { AuthGuard } from '../auth/guards/auth.guard';
-import { ExternalProvider } from '@prisma/client';
+import { ExternalProvider, IntegrationAuthType } from 'generated/prisma/enums';
 
 @UseGuards(AuthGuard)
 @Controller('integrations')
@@ -9,7 +9,7 @@ export class IntegrationsController {
     constructor(private integrations: IntegrationsService) { }
 
     @Post('connect')
-    async connect(@Req() req: any, @Body() body: { orgId: string; type: ExternalProvider; authType: string; config: any }) {
+    async connect(@Req() req: any, @Body() body: { orgId: string; type: ExternalProvider; authType: IntegrationAuthType; config: any }) {
         return this.integrations.create(body.orgId, body.type, body.authType, body.config);
     }
 

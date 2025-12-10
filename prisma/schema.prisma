@@ -97,58 +97,70 @@ model User {
     firstName        String?
     lastName         String?
     password         String?
-    authToken        String?
     isVerified       Boolean        @default(false)
     isOnline         Boolean        @default(false)
-    oneTimePassword  String?
     avatarUrl        String?
     dateOfBirth      DateTime?
+    authIdentities   AuthIdentity[]
+    role             UserRole       @default(USER)
+    gender           Gender?
     lastLogin        DateTime?
+    oneTimePassword  String?
     oneTimeExpire    DateTime?
     resetToken       String?
     resetTokenExpire DateTime?
-    accountType      AccountType[]  @default([PHONE])
-    authProvider     AuthProvider[] @default([OTP])
-    role             UserRole       @default(USER)
-    gender           Gender?
     createdAt        DateTime       @default(now()) @map("created_at")
     updatedAt        DateTime       @default(now()) @updatedAt @map("updated_at")
 
     // Relations
-    invalidatedTokens InvalidatedToken[]
-    memberships       OrganizationMember[]
-    invites           Invite[]
-    llmOutputs        LlmOutput[]
-    organizations     Organization[] // organizations owned by this user (owner role)
-    identities        Identity[] // external identities (github/slack/discord)
-    aliases           IdentityAlias[] // nicknames created by owner/admin mapping
-    roleTemplates     RoleTemplate[]
-    contributorMaps   ContributorMap[]
+    sessions        Session[]
+    projects        Project[]
+    memberships     OrganizationMember[]
+    invites         Invite[]
+    llmOutputs      LlmOutput[]
+    organizations   Organization[] // organizations owned by this user (owner role)
+    identities      Identity[] // external identities (github/slack/discord)
+    aliases         IdentityAlias[] // nicknames created by owner/admin mapping
+    roleTemplates   RoleTemplate[]
+    contributorMaps ContributorMap[]
 }
 
-model InvalidatedToken {
-    id            String   @id @default(uuid())
-    refreshToken  String   @unique
-    userId        String
-    invalidatedAt DateTime @default(now())
-    user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+model AuthIdentity {
+    id         String       @id @default(uuid())
+    userId     String
+    user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+    provider   AuthProvider
+    providerId String
+    type       AccountType
+    createdAt  DateTime     @default(now())
+
+    @@unique([provider, providerId])
+    @@index([userId])
 }
 
-/// Store external identities (one per provider/account)
+model Session {
+    id           String   @id @default(uuid())
+    userId       String
+    refreshToken String
+    ip           String?
+    userAgent    String?
+    expiresAt    DateTime
+    createdAt    DateTime @default(now()) @map("created_at")
+    updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+    user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 model Identity {
-    id             String           @id @default(uuid())
-    provider       ExternalProvider
-    providerUserId String // provider-specific unique id (e.g., github username or id, slack user id)
-    displayName    String? // provider display name
-    avatarUrl      String?
-    rawProfile     Json? // raw provider information (profile)
-    createdAt      DateTime         @default(now())
-
-    // Optional link to a User (owner/admin may map)
-    linkedUserId String?
-    linkedUser   User?   @relation(fields: [linkedUserId], references: [id], onDelete: SetNull)
-
-    // Organization scope (optional — identity could be org-scoped)
+    id              String           @id @default(uuid())
+    provider        ExternalProvider
+    providerUserId  String // provider-specific unique id (e.g., github username or id, slack user id)
+    displayName     String? // provider display name
+    avatarUrl       String?
+    rawProfile      Json? // raw provider information (profile)
+    createdAt       DateTime         @default(now()) @map("created_at")
+    updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+    linkedUserId    String?
+    linkedUser      User?            @relation(fields: [linkedUserId], references: [id], onDelete: SetNull)
     organizationId  String?
     organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
     identityAlias   IdentityAlias[]
@@ -157,22 +169,20 @@ model Identity {
     @@index([provider, providerUserId], map: "idx_identity_provider_user")
 }
 
-/// Owner-defined alias / nickname for an identity (for friendly display)
 model IdentityAlias {
     id          String   @id @default(uuid())
     identity    Identity @relation(fields: [identityId], references: [id])
     identityId  String
-    createdById String // owner/admin who created alias
+    createdById String
     createdBy   User     @relation(fields: [createdById], references: [id])
     alias       String
     note        String?
-    createdAt   DateTime @default(now())
-    updatedAt   DateTime @default(now()) @updatedAt
+    createdAt   DateTime @default(now()) @map("created_at")
+    updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
 
     @@unique([identityId, alias])
 }
 
-/// Organization
 model Organization {
     id        String   @id @default(uuid())
     name      String
@@ -184,73 +194,110 @@ model Organization {
     updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
     // Relations
-    members      OrganizationMember[]
-    projects     Project[]
-    integrations Integration[]
-    invites      Invite[]
-
-    // Custom role templates created by owner/admin: store name + permissions list
+    members         OrganizationMember[]
+    projects        Project[]
+    integrations    Integration[]
+    invites         Invite[]
     roleTemplates   RoleTemplate[]
     identities      Identity[]
     contributorMaps ContributorMap[]
     ingestionJobs   IngestionJob[]
 }
 
-/// Organization memberships and role assignment (rolePermissions cached for fast checks)
+enum OrgMemberStatus {
+    INVITED
+    ACTIVE
+    SUSPENDED
+}
+
 model OrganizationMember {
     id             String             @id @default(uuid())
     organization   Organization       @relation(fields: [organizationId], references: [id])
     organizationId String
-    user           User               @relation(fields: [userId], references: [id])
+    user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
     userId         String
-    predefinedRole PredefinedOrgRole? // OWNER / ADMIN / DEVELOPER / VIEWER etc (optional)
-    customRoleName String? // if they created a custom role (RoleTemplate.name)
-    permissions    Json? // cached permission list (array of PermissionName strings)
-    status         String             @default("active") // invited, active, suspended
+    predefinedRole PredefinedOrgRole?
+    roleId         String?
+    role           RoleTemplate?      @relation(fields: [roleId], references: [id])
+    status         OrgMemberStatus    @default(ACTIVE)
     invitedBy      String?
-    createdAt      DateTime           @default(now())
-    updatedAt      DateTime           @default(now()) @updatedAt
-
-    // Mapping convenience
-    identityMaps ContributorMap[] // maps provider identities to this member
-    tasks        Task[]
+    createdAt      DateTime           @default(now()) @map("created_at")
+    updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
+    identityMaps   ContributorMap[]
+    tasks          Task[]
 
     @@index([organizationId, userId], name: "idx_org_member")
 }
 
-/// Template for custom roles inside org (owner creates)
+enum PermissionScope {
+    ORG
+    PROJECT
+}
+
+model Permissions {
+    id              String                   @id @default(uuid())
+    name            String                   @unique
+    code            String                   @unique
+    description     String
+    scope           PermissionScope
+    createdAt       DateTime                 @default(now()) @map("created_at")
+    updatedAt       DateTime                 @default(now()) @updatedAt @map("updated_at")
+    rolePermissions RoleTemplatePermission[]
+}
+
+model RoleTemplatePermission {
+    roleTemplateId String
+    permissionId   String
+    roleTemplate   RoleTemplate @relation(fields: [roleTemplateId], references: [id], onDelete: Cascade)
+    permission     Permissions  @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+    createdAt      DateTime     @default(now())
+
+    @@id([roleTemplateId, permissionId])
+    @@index([permissionId])
+}
+
 model RoleTemplate {
-    id             String           @id @default(uuid())
-    organization   Organization     @relation(fields: [organizationId], references: [id])
-    organizationId String
-    name           String
-    description    String?
-    permissions    PermissionName[] // canonical list of permission enums
-    createdById    String
-    createdBy      User             @relation(fields: [createdById], references: [id])
-    createdAt      DateTime         @default(now())
-    updatedAt      DateTime         @default(now()) @updatedAt
+    id              String                   @id @default(uuid())
+    organization    Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId  String
+    name            String
+    description     String?
+    createdById     String
+    createdBy       User                     @relation(fields: [createdById], references: [id])
+    createdAt       DateTime                 @default(now()) @map("created_at")
+    updatedAt       DateTime                 @default(now()) @updatedAt @map("updated_at")
+    rolePermissions RoleTemplatePermission[]
+    invites         Invite[]
+    members         OrganizationMember[]
 
     @@unique([organizationId, name])
 }
 
-/// Invite record
-model Invite {
-    id             String       @id @default(uuid())
-    organization   Organization @relation(fields: [organizationId], references: [id])
-    organizationId String
-    email          String
-    role           String
-    invitedBy      String
-    token          String       @unique
-    status         String       @default("pending")
-    createdAt      DateTime     @default(now())
-    updatedAt      DateTime     @default(now()) @updatedAt
-    user           User?        @relation(fields: [userId], references: [id])
-    userId         String?
+enum InviteStatus {
+    PENDING
+    ACCEPTED
+    REJECTED
 }
 
-/// Project
+model Invite {
+    id             String             @id @default(uuid())
+    organization   Organization       @relation(fields: [organizationId], references: [id])
+    organizationId String
+    email          String
+    predefinedRole PredefinedOrgRole?
+    roleId         String?
+    role           RoleTemplate?      @relation(fields: [roleId], references: [id])
+    invitedBy      String
+    token          String             @unique
+    status         InviteStatus       @default(PENDING)
+    createdAt      DateTime           @default(now()) @map("created_at")
+    updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
+    user           User?              @relation(fields: [userId], references: [id])
+    userId         String?
+
+    @@index([token])
+}
+
 model Project {
     id             String       @id @default(uuid())
     organization   Organization @relation(fields: [organizationId], references: [id])
@@ -258,7 +305,8 @@ model Project {
     name           String
     slug           String       @unique
     description    String?
-    createdBy      String
+    createdById    String
+    createdBy      User         @relation(fields: [createdById], references: [id])
     settings       Json?
     createdAt      DateTime     @default(now()) @map("created_at")
     updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at")
@@ -270,17 +318,28 @@ model Project {
     ingestionJobs IngestionJob[]
 }
 
-/// Integration (per org)
+enum IntegrationAuthType {
+    OAUTH
+    APP_JWT
+    TOKEN
+    SERVICE_ACCOUNT
+}
+
+enum IntegrationStatus {
+    CONNECTED
+    NOT_CONNECTED
+}
+
 model Integration {
-    id             String           @id @default(uuid())
-    organization   Organization     @relation(fields: [organizationId], references: [id])
+    id             String              @id @default(uuid())
+    organization   Organization        @relation(fields: [organizationId], references: [id])
     organizationId String
-    type           ExternalProvider // github, slack, discord, notion, jira...
-    authType       String // oauth, app_jwt, token, service_account
-    config         Json? // provider-specific details (encrypted reference)
-    status         String           @default("connected")
-    createdAt      DateTime         @default(now()) @map("created_at")
-    updatedAt      DateTime         @default(now()) @updatedAt @map("updated_at")
+    type           ExternalProvider
+    authType       IntegrationAuthType
+    config         Json?
+    status         IntegrationStatus   @default(CONNECTED)
+    createdAt      DateTime            @default(now()) @map("created_at")
+    updatedAt      DateTime            @default(now()) @updatedAt @map("updated_at")
 
     connections   IntegrationConnection[]
     rawEvents     RawEvent[]
@@ -288,7 +347,6 @@ model Integration {
     ingestionJobs IngestionJob[]
 }
 
-/// IntegrationConnection binds an Integration to a Project with selected items
 model IntegrationConnection {
     id            String      @id @default(uuid())
     project       Project     @relation(fields: [projectId], references: [id])
@@ -302,7 +360,6 @@ model IntegrationConnection {
     @@index([projectId, integrationId])
 }
 
-/// Resources discovered under an integration (e.g., specific Github repo, slack channel)
 model IntegrationResource {
     id            String           @id @default(uuid())
     integration   Integration      @relation(fields: [integrationId], references: [id])
@@ -322,7 +379,6 @@ model IntegrationResource {
     @@unique([integrationId, provider, providerId], name: "uq_integration_resource_provider")
 }
 
-/// Map external identity to an OrganizationMember (approved by owner/admin)
 model ContributorMap {
     id             String             @id @default(uuid())
     organizationId String
@@ -331,32 +387,30 @@ model ContributorMap {
     identity       Identity           @relation(fields: [identityId], references: [id])
     memberId       String
     member         OrganizationMember @relation(fields: [memberId], references: [id])
-    mappedById     String // who created this map (owner/admin)
+    mappedById     String
     mappedBy       User               @relation(fields: [mappedById], references: [id])
-    createdAt      DateTime           @default(now())
-    updatedAt      DateTime           @default(now()) @updatedAt
+    createdAt      DateTime           @default(now()) @map("created_at")
+    updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
 
     @@unique([organizationId, identityId], name: "uq_contributor_map_org_identity")
 }
 
-/// Task model to mirror Notion/Jira items and track deadlines
 model Task {
     id          String              @id @default(uuid())
     project     Project             @relation(fields: [projectId], references: [id])
     projectId   String
-    provider    ExternalProvider? // optional: source provider
-    providerId  String? // provider-specific task id
+    provider    ExternalProvider?
+    providerId  String?
     title       String
     description String?
-    assigneeId  String? // OrganizationMember id (if assigned)
+    assigneeId  String?
     assignee    OrganizationMember? @relation(fields: [assigneeId], references: [id])
     status      TaskStatus          @default(TODO)
-    priority    Int? // custom priority score
+    priority    Int?
     dueDate     DateTime?
-    createdAt   DateTime            @default(now())
-    updatedAt   DateTime            @default(now()) @updatedAt
+    createdAt   DateTime            @default(now()) @map("created_at")
+    updatedAt   DateTime            @default(now()) @updatedAt @map("updated_at")
     metadata    Json?
-    // Keep history of task events in raw events if needed (a RawEvent can be a TASK_UPDATE)
 }
 
 /// Raw events normalized from providers (historical import + webhooks)
@@ -450,35 +504,50 @@ model WebhookEvent {
     @@index([provider, providerEventId], name: "idx_webhook_provider_event")
 }
 
+enum IngestionStatus {
+    PENDING
+    RUNNING
+    COMPLETED
+    FAILED
+}
+
 /// Background import / ingestion job tracking (historical imports)
 model IngestionJob {
-    id             String       @id @default(uuid())
+    id             String          @id @default(uuid())
     organizationId String
-    organization   Organization @relation(fields: [organizationId], references: [id])
+    organization   Organization    @relation(fields: [organizationId], references: [id])
     projectId      String?
-    project        Project?     @relation(fields: [projectId], references: [id])
+    project        Project?        @relation(fields: [projectId], references: [id])
     integrationId  String?
-    integration    Integration? @relation(fields: [integrationId], references: [id])
+    integration    Integration?    @relation(fields: [integrationId], references: [id])
     resourceId     String? // IntegrationResource.providerId (e.g. repo full name)
     type           String // historical_import, backfill_embeddings, reprocess_events...
-    status         String       @default("pending") // pending, running, completed, failed
+    status         IngestionStatus @default(PENDING)
     progress       Json? // arbitrary progress counters
     error          String?
     startedAt      DateTime?
     finishedAt     DateTime?
-    createdAt      DateTime     @default(now())
-    updatedAt      DateTime     @default(now()) @updatedAt
+    createdAt      DateTime        @default(now()) @map("created_at")
+    updatedAt      DateTime        @default(now()) @updatedAt @map("updated_at")
+}
+
+enum JobStatus {
+    PENDING
+    RUNNING
+    COMPLETED
+    FAILED
+    RETRY
 }
 
 /// Jobs (generic queue metadata)
 model Job {
-    id        String   @id @default(uuid())
+    id        String    @id @default(uuid())
     type      String
     payload   Json
-    status    String   @default("pending")
-    attempts  Int      @default(0)
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+    status    JobStatus @default(PENDING)
+    attempts  Int       @default(0)
+    createdAt DateTime  @default(now()) @map("created_at")
+    updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
 }
 
 /// Audit logs
