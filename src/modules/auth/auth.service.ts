@@ -17,7 +17,7 @@ import { Request, Response } from 'express';
 import { RequestDto } from './dto/request.dto';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { AccountType, AuthProvider, Prisma, User } from 'generated/prisma/client';
+import { AccountType, AuthProvider, Prisma, User, UserRole } from 'generated/prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -36,15 +36,11 @@ export class AuthService {
 			const secret = this.config.get<string>('ACCESS_TOKEN_SECRET');
 			const payload: { id: string } = await this.jwtService.verifyAsync(token, { secret });
 			const user = await this.databaseService.user.findUnique({ where: { id: payload.id } });
-			if (!user) {
-				throw new UnauthorizedException('Invalid user.');
-			}
+			if (!user) throw new UnauthorizedException('Invalid user.');
 
 			return user;
 		} catch (err: any) {
-			if (err.name === 'TokenExpiredError') {
-				throw new UnauthorizedException('Token expired.');
-			}
+			if (err.name === 'TokenExpiredError') throw new UnauthorizedException('Token expired.');
 			throw new UnauthorizedException('Invalid token.');
 		}
 	}
@@ -110,9 +106,7 @@ export class AuthService {
 
 	// Validate if either phoneNumber or email is available
 	validateContactInfo(phoneNumber?: string, email?: string) {
-		if (!phoneNumber && !email) {
-			throw new BadRequestException('Either phoneNumber or email is required!!');
-		}
+		if (!phoneNumber && !email) throw new BadRequestException('Either phoneNumber or email is required!!');
 	}
 
 	// --- Services ---
@@ -175,6 +169,7 @@ export class AuthService {
 				password: hashedPassword,
 				phoneNumber,
 				email,
+				role: process.env.DEFAULT_ADMIN_PHONE === phoneNumber || process.env.DEFAULT_ADMIN_EMAIL === email ? UserRole.ADMIN : UserRole.USER,
 				authIdentities: {
 					create: {
 						provider: AuthProvider.PASSWORD,
@@ -189,7 +184,7 @@ export class AuthService {
 
 		const session = await this.databaseService.session.create({
 			data: {
-				userId: user.id,
+				userId: newUser.id,
 				refreshToken: "",
 				expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
 			},
@@ -205,8 +200,10 @@ export class AuthService {
 			data: { refreshToken: hashedToken },
 		});
 
+		const clientRefreshToken = `${session.id}.${refreshToken}`;
+
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
-		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
+		await this.sendToken(res, "REFRESH_TOKEN", clientRefreshToken);
 
 		if (process.env.NODE_ENV === "production") {
 			// await this.sendOtp(phoneNumber, otpString);
@@ -214,7 +211,7 @@ export class AuthService {
 		}
 		console.log("OTP: ", otpString);
 
-		return { message: 'User registered successfully!!', data: newUser, accessToken, refreshToken };
+		return { message: 'User registered successfully!!', data: newUser, accessToken, clientRefreshToken };
 	}
 
 	async verifyOtp(dto: OtpDto, res: Response) {
@@ -268,15 +265,23 @@ export class AuthService {
 			data: { refreshToken: hashedToken },
 		});
 
-		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
-		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
+		const clientRefreshToken = `${session.id}.${refreshToken}`;
 
-		return { message: 'User verified successfully', data: updatedUser, accessToken, refreshToken };
+		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
+		await this.sendToken(res, "REFRESH_TOKEN", clientRefreshToken);
+
+		return { message: 'User verified successfully', data: updatedUser, accessToken, clientRefreshToken };
 	}
 
 	async refreshToken(req: Request, res: Response) {
-		const token = req.cookies?.['refreshToken'] || req.headers.authorization?.split(' ')?.[1];
-		if (!token) throw new NotFoundException('Refresh token not found!!');
+		const clientToken = req.cookies?.['refreshToken'] || req.headers.authorization?.split(' ')?.[1];
+		if (!clientToken) throw new NotFoundException('Refresh token not found!!');
+
+		const parts = clientToken.split(".");
+		const sessionId = parts.shift();
+		const token = parts.join(".");
+
+		if (!sessionId || !token) throw new UnauthorizedException('Malformed token');
 
 		const decoded = await this.jwtService.verifyAsync(token, { secret: process.env.REFRESH_TOKEN_SECRET });
 		if (!decoded) throw new UnauthorizedException('Invalid refresh token!!');
@@ -342,22 +347,25 @@ export class AuthService {
 			data: { refreshToken: hashedToken },
 		});
 
-		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
-		await this.sendToken(res, "REFRESH_TOKEN", refreshToken);
+		const clientRefreshToken = `${session.id}.${refreshToken}`;
 
-		return { message: 'User logged in successfully!!', data: user, accessToken, refreshToken };
+		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
+		await this.sendToken(res, "REFRESH_TOKEN", clientRefreshToken);
+
+		return { message: 'User logged in successfully!!', data: user, accessToken, clientRefreshToken };
 	}
 
 	async logout(req: Request, res: Response, userId: string) {
 		const refreshToken = req.cookies.refreshToken;
 
 		if (refreshToken) {
-			const session = await this.databaseService.session.findFirst({
-				where: { refreshToken },
-			});
-			await this.databaseService.session.delete({
-				where: { id: session.id }
-			});
+			const [sessionId] = refreshToken.split(".");
+
+			if (sessionId) {
+				await this.databaseService.session.deleteMany({
+					where: { id: sessionId, userId }
+				});
+			}
 		}
 
 		await this.clearToken(res, "ACCESS_TOKEN");

@@ -4,8 +4,8 @@ import { WebhookJobPayload } from '../webhook.queue';
 import { Injectable, Logger } from '@nestjs/common';
 import { LLMQueue } from '../llm.queue';
 import { DatabaseService } from 'src/services/database/database.service';
-import { ExternalProvider } from '@prisma/client';
 import { LoggerService } from 'src/services/logger/logger.service';
+import { ExternalProvider } from 'generated/prisma/enums';
 
 @Injectable()
 @Processor(WEBHOOK_QUEUE)

@@ -1,7 +1,7 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
-import { ExternalProvider } from '@prisma/client';
 import { Queue } from 'bullmq';
+import { ExternalProvider } from 'generated/prisma/enums';
 import { WEBHOOK_QUEUE } from 'src/config/constants';
 
 export interface WebhookJobPayload {

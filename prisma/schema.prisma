@@ -42,6 +42,7 @@ enum ExternalProvider {
     DISCORD
     NOTION
     JIRA
+    FIGMA
 }
 
 /// --- Generic enums used earlier ---

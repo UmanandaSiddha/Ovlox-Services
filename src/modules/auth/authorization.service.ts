@@ -1,6 +1,5 @@
 import { Injectable, ForbiddenException } from '@nestjs/common';
-import { PermissionName, PredefinedOrgRole } from '@prisma/client';
-import { OrgMemberStatus } from 'generated/prisma/enums';
+import { OrgMemberStatus, PermissionName, PredefinedOrgRole } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 
 const PREDEFINED_PERMISSIONS: Record<PredefinedOrgRole, PermissionName[]> = {

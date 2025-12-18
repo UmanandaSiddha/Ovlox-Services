@@ -1,4 +1,3 @@
-import { Gender } from '@prisma/client';
 import {
     IsDateString,
     IsEnum,
@@ -6,6 +5,7 @@ import {
     IsString,
     IsUrl,
 } from 'class-validator';
+import { Gender } from 'generated/prisma/enums';
 
 export class ProfileDto {
     @IsString()

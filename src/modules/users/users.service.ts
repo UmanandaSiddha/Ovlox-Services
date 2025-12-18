@@ -3,7 +3,8 @@ import { DatabaseService } from 'src/services/database/database.service';
 import { PrismaApiFeatures, QueryString } from 'src/utils/apiFeatures';
 import { UserDetailsDto } from './dto/details.dto';
 import { ProfileDto } from './dto/profile.dto';
-import { Gender } from '@prisma/client';
+import { Gender } from 'generated/prisma/enums';
+import { Prisma } from 'generated/prisma/client';
 
 @Injectable()
 export class UserService {
@@ -23,24 +24,35 @@ export class UserService {
     }
 
     // ADMIN: Get All Users
-    //api/v1/users?include=profile,profile.cart,profile.cart.cartItems
     async getAllUsers(filters: QueryString) {
-        const apiFeatures = new PrismaApiFeatures(this.databaseService.user, filters)
-            .search(['email', 'phoneNumber'])
-            .filter()   // ?isVerified=true, ?profile.firstName=John
-            .sort()     // ?sort=createdAt_asc
-            .include()  // ?include=profile,profile.cart
-            .pagination(); // ?page=2&limit=10
+        const apiFeatures = new PrismaApiFeatures<
+            Prisma.UserWhereInput,
+            Prisma.UserInclude,
+            Prisma.UserOrderByWithRelationInput,
+            typeof this.databaseService.user
+        >(this.databaseService.user, filters)
+            .search(['firstName', 'lastName', 'email', 'phoneNumber'])
+            .filter()
+            .sort()
+            .include({
+                aliases: true,
+                authIdentities: true,
+                memberships: {
+                    include: {
+                        organization: true,
+                        role: true
+                    }
+                },
+            })
+            .pagination();
 
         const { results: users, totalCount } = await apiFeatures.execute();
-
-        const totalPages = Math.ceil(totalCount / (Number(filters.limit) || 10));
 
         return {
             success: true,
             count: users.length,
             totalCount,
-            totalPages,
+            totalPages: Math.ceil(totalCount / (Number(filters.limit) || 10)),
             data: users,
         }
     }
@@ -83,6 +95,14 @@ export class UserService {
         try {
             const user = await this.databaseService.user.findFirst({
                 where: { id: userId },
+                omit: { password: true },
+                include: {
+                    memberships: {
+                        include: {
+                            organization: true
+                        }
+                    }
+                }
             });
             if (!user) throw new BadRequestException('User not found');
 

@@ -1,32 +1,28 @@
-import { Controller, Post, Body, UseGuards, Req, Get } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Get, Param, Query } from '@nestjs/common';
 import { OrganizationsService } from './organizations.service';
-import { AuthGuard } from '../auth/guards/auth.guard';
+import { AuthGuard, getUser } from '../auth/guards/auth.guard';
+import { RoleGuard } from '../auth/guards/role.guard';
+import { CreateOrgDto } from './dto/createOrg.dto';
+import { QueryString } from 'src/utils/apiFeatures';
 
 @Controller('orgs')
+@UseGuards(AuthGuard, RoleGuard)
 export class OrganizationsController {
     constructor(private orgs: OrganizationsService) { }
 
     @UseGuards()
-    @Post('/')
-    async create(@Req() req: any, @Body() body: { name: string }) {
-        return this.orgs.createOrg(req.user.userId, body.name);
+    @Post('create')
+    async create(@getUser('id') userId: string, @Body() dto: CreateOrgDto) {
+        return this.orgs.createOrg(userId, dto);
     }
 
-    @UseGuards(AuthGuard)
-    @Post(':id/invite')
-    async invite(@Req() req: any, @Body() body: { orgId: string, email: string, role: string }) {
-        return this.orgs.invite(body.orgId, body.email, body.role, req.user.userId);
+    @Get('user')
+    async userOrgs(@getUser('id') userId: string, @Query() filters: QueryString) {
+        return this.orgs.userOrgs(userId, filters);
     }
 
-    @UseGuards(AuthGuard)
-    @Post('invites/accept')
-    async accept(@Req() req: any, @Body() body: { token: string }) {
-        return this.orgs.acceptInvite(body.token, req.user.userId);
-    }
-
-    @UseGuards(AuthGuard)
-    @Get('my')
-    async myOrgs(@Req() req: any) {
-        return this.orgs.listOrgsForUser(req.user.userId);
+    @Get('user/byId/:id')
+    async myOrgs(@getUser('id') userId: string, @Param('id') orgId: string) {
+        return this.orgs.userOrgById(userId, orgId);
     }
 }

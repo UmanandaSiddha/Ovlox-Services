@@ -5,8 +5,8 @@ import { UserService } from './users.service';
 import { ProfileDto } from './dto/profile.dto';
 import { UserDetailsDto } from './dto/details.dto';
 import { Roles } from '../auth/decorator/role.decorator';
-import { UserRole } from '@prisma/client';
 import { QueryString } from 'src/utils/apiFeatures';
+import { UserRole } from 'generated/prisma/enums';
 
 @Controller('user')
 @UseGuards(AuthGuard, RoleGuard)

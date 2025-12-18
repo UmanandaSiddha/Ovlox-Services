@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { BaseExceptionFilter } from '@nestjs/core';
 import { Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
 import { LoggerService } from './services/logger/logger.service';
+import { Prisma } from 'generated/prisma/client';
 
 @Catch()
 export class AllExceptionsFilter extends BaseExceptionFilter {

@@ -56,7 +56,7 @@ export class AuthController {
 	// LOGOUT
 	@UseGuards(AuthGuard)
 	@Put('logout')
-	async logout(@Body() @Req() req: Request, @Res({ passthrough: true }) res: Response, @getUser('id') userId: string) {
+	async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response, @getUser('id') userId: string) {
 		return this.authService.logout(req, res, userId);
 	}
 }
