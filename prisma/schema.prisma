@@ -328,6 +328,7 @@ enum IntegrationAuthType {
 
 enum IntegrationStatus {
     CONNECTED
+    PROCESSING
     NOT_CONNECTED
 }
 

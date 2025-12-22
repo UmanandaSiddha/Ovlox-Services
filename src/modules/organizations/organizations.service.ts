@@ -4,11 +4,14 @@ import { DatabaseService } from 'src/services/database/database.service';
 import { CreateOrgDto } from './dto/createOrg.dto';
 import { PrismaApiFeatures, QueryString } from 'src/utils/apiFeatures';
 import { Prisma } from 'generated/prisma/client';
+import { RedisService } from 'src/services/redis/redis.service';
+import { REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX } from 'src/config/constants';
 
 @Injectable()
 export class OrganizationsService {
     constructor(
         private readonly databaseService: DatabaseService,
+        private readonly redisService: RedisService
     ) { }
 
     async createOrg(ownerId: string, dto: CreateOrgDto) {
@@ -88,15 +91,71 @@ export class OrganizationsService {
         }
     }
 
-    async userOrgById(userId: string, orgId: string) {
+    async userOrgBySlug(userId: string, slug: string) {
         const organization = await this.databaseService.organization.findUnique({
-            where: { id: orgId, ownerId: userId },
+            where: { slug, ownerId: userId },
             include: {
-                members: true,
+                members: {
+                    include: {
+                        user: true
+                    }
+                },
                 projects: true,
                 integrations: true
             }
         });
+        if (!organization) return null;
+
+        return { message: `Successfully Fetched Organization by Slug ${slug}`, organization }
+    }
+
+    async userOrgById(userId: string, orgId: string) {
+        const organization = await this.databaseService.organization.findUnique({
+            where: { id: orgId, ownerId: userId },
+            include: {
+                members: {
+                    include: {
+                        user: true
+                    }
+                },
+                projects: true,
+                integrations: true
+            }
+        });
+        if (!organization) return null;
+
         return { message: `Successfully Fetched Organization by Id ${orgId}`, organization }
+    }
+
+    async integrationStatus(userId: string, slug: string) {
+        const key = `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${slug}`
+        const cachedIntegrations = await this.redisService.get(key);
+        if (cachedIntegrations) {
+            return {
+                integrations: JSON.parse(cachedIntegrations)
+            }
+        }
+
+        const organization = await this.databaseService.organization.findUnique({
+            where: { slug, ownerId: userId },
+            include: {
+                integrations: true
+            }
+        });
+        if (!organization) return null;
+
+        const integrations = organization.integrations.map((integration) => ({
+            app: integration.type,
+            authType: integration.authType,
+            status: integration.status,
+        }));
+
+        await this.redisService.set(
+            key,
+            JSON.stringify(integrations),
+            60 * 60
+        )
+
+        return { integrations }
     }
 }
