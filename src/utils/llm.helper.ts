@@ -14,7 +14,7 @@ type LlmOptions = {
 };
 
 export class LlmHelper {
-    private static defaultModel = "gpt-4o-mini"; // fast + cheap
+    private static defaultModel = "gpt-4o-mini";
     private static timeoutMs = 45_000;
 
     static async generateText(
@@ -29,10 +29,7 @@ export class LlmHelper {
         } = options;
 
         const controller = new AbortController();
-        const timeout = setTimeout(
-            () => controller.abort(),
-            this.timeoutMs
-        );
+        const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
         try {
             const res = await openai.chat.completions.create(
@@ -49,15 +46,51 @@ export class LlmHelper {
             );
 
             return res.choices[0]?.message?.content?.trim() ?? "";
-        } catch (err: any) {
-            if (err.name === "AbortError") {
-                throw new Error("LLM request timed out");
-            }
-            throw err;
         } finally {
             clearTimeout(timeout);
         }
     }
+
+    static async generateJson<T>(
+        systemPrompt: string,
+        userPrompt: string,
+        options: LlmOptions = {}
+    ): Promise<T> {
+        const raw = await this.generateText(systemPrompt, userPrompt, {
+            temperature: 0,
+            maxTokens: options.maxTokens ?? 800,
+        });
+
+        try {
+            return extractJson(raw) as T;
+        } catch (err) {
+            console.error("Invalid JSON from LLM:", raw);
+            throw new Error("LLM returned invalid JSON");
+        }
+    }
+
+}
+
+function extractJson(text: string): any {
+    if (!text || typeof text !== "string") {
+        throw new Error("LLM returned empty response");
+    }
+
+    const cleaned = text
+        .replace(/```json/gi, "")
+        .replace(/```/g, "")
+        .trim();
+
+    try {
+        return JSON.parse(cleaned);
+    } catch { }
+
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) {
+        throw new Error("No JSON object found in LLM output");
+    }
+
+    return JSON.parse(match[0]);
 }
 
 export async function summarizeCodeChange(input: {
@@ -100,35 +133,49 @@ export async function summarizeCodeChange(input: {
 }
 
 export async function analyzeCodeQuality(input: {
-    files: Array<{
-        filename: string;
-        patch?: string | null;
-    }>;
+    files: { filename: string; patch?: string | null }[];
 }) {
     const systemPrompt = `
-    You are a code reviewer and security expert.
-    Return structured feedback in 4-5 lines.
+    You are a senior code reviewer.
+
+    Return JSON ONLY in this exact format:
+
+    {
+    "score": number,
+    "summary": string,
+    "issues": [
+        {
+        "type": string,
+        "severity": "low" | "medium" | "high",
+        "description": string
+        }
+    ],
+    "suggestions": string[]
+    }
+
+    Rules:
+    - score must be 0–100
+    - issues may be empty
+    - suggestions may be empty
+    - DO NOT add markdown
+    - DO NOT wrap in \`\`\`
     `;
 
     const userPrompt = `
-    Review the following changes.
-
-    For each category give bullet points:
-    - Code Quality (score 0–100)
-    - Security Risk (Low/Medium/High)
-    - Improvements
-
-    FILES:
+    FILES CHANGED:
     ${input.files
-            .map(f => `File: ${f.filename}\n${f.patch ?? ""}`)
+            .map(f => `File: ${f.filename}\n${f.patch ?? "Diff omitted"}`)
             .join("\n\n")}
     `;
 
-    return LlmHelper.generateText(systemPrompt, userPrompt, {
-        temperature: 0.2,
-        maxTokens: 500,
-    });
+    return LlmHelper.generateJson<{
+        score: number;
+        summary: string;
+        issues: any[];
+        suggestions: string[];
+    }>(systemPrompt, userPrompt, { maxTokens: 600 });
 }
+
 
 export async function analyzeIssue(input: {
     title: string;
@@ -186,5 +233,50 @@ export async function generateDebugFix(input: {
         maxTokens: 700,
     });
 }
+
+export async function analyzeSecurityRisk(params: {
+    files: { filename: string; patch?: string | null }[];
+}) {
+    const systemPrompt = `
+    You are a security-focused code reviewer.
+
+    Return JSON ONLY in this format:
+
+    {
+    "risk": "none" | "low" | "medium" | "high",
+    "summary": string,
+    "findings": [
+        {
+        "type": string,
+        "severity": "low" | "medium" | "high",
+        "file": string,
+        "description": string
+        }
+    ],
+    "canAutoFix": boolean
+    }
+
+    Rules:
+    - If no issues, risk = "none" and findings = []
+    - DO NOT include markdown
+    - DO NOT wrap in \`\`\`
+    `;
+
+    const userPrompt = `
+    CODE CHANGES:
+    ${params.files
+            .map(f => `File: ${f.filename}\n${f.patch ?? "Diff omitted"}`)
+            .join("\n\n")}
+    `;
+
+    return LlmHelper.generateJson<{
+        risk: string;
+        summary: string;
+        findings: any[];
+        canAutoFix: boolean;
+    }>(systemPrompt, userPrompt, { maxTokens: 700 });
+}
+
+
 
 

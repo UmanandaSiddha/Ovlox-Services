@@ -7,7 +7,8 @@ import { decrypt, encrypt } from 'src/utils/encryption';
 import { signState } from 'src/utils/oauth-state';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
-import { analyzeCodeQuality, summarizeCodeChange } from 'src/utils/llm.helper';
+import { analyzeCodeQuality, analyzeSecurityRisk, generateDebugFix, summarizeCodeChange } from 'src/utils/llm.helper';
+import { DebugFixResponse, SecurityRisk } from 'src/utils/types';
 
 @Injectable()
 export class GithubService {
@@ -477,7 +478,7 @@ export class GithubService {
         // };
 
         const owner = "UmanandaSiddha";
-        const repo = "Ovlox-Services";
+        const repo = "Ghibli-Portfolio";
 
         if (!owner || !repo) {
             throw new BadRequestException("Repo not configured for integration");
@@ -565,6 +566,8 @@ export class GithubService {
                         message: c.commit.message,
                         author: c.commit.author?.name,
                         date: c.commit.author?.date,
+                        authorAvatar: c.author?.avatar_url ?? null,
+                        authorUsername: c.author?.login ?? null,
                         filesChanged: detail.data.files?.length,
                         additions: detail.data.stats?.additions,
                         deletions: detail.data.stats?.deletions,
@@ -598,43 +601,55 @@ export class GithubService {
             patch: this.truncatePatch(f.patch),
         }));
 
-        let aiSummary = null;
-        let codeQuality = null;
+        let aiSummary = "AI summary unavailable";
+        let codeQuality = {
+            score: null,
+            summary: "Code quality analysis not available for small changes.",
+            issues: [],
+            suggestions: [],
+        };
+        let security = {
+            risk: "none",
+            summary: "",
+            findings: [],
+            canAutoFix: false,
+        };
 
-        if (stats.total > 20) {
+        if (stats.total > 10) {
             try {
-                [aiSummary, codeQuality] = await Promise.all([
+                const [summary, quality, securityResult] = await Promise.all([
                     summarizeCodeChange({
                         title: commit.message,
                         files: normalizedFiles,
                     }),
-                    analyzeCodeQuality({
-                        files: normalizedFiles,
-                    }),
+                    analyzeCodeQuality({ files: normalizedFiles }),
+                    analyzeSecurityRisk({ files: normalizedFiles }),
                 ]);
-            } catch (e) {
-                console.error("LLM failed", e);
+
+                aiSummary = summary;
+                codeQuality = quality;
+                security = securityResult;
+            } catch (err) {
+                console.error("LLM failed:", err);
             }
         }
 
         return {
             commit: {
                 sha,
-                message: res.data.commit.message,
-                author: res.data.commit.author?.name,
-                date: res.data.commit.author?.date,
+                message: commit.message,
+                author: commit.author?.name,
+                date: commit.author?.date,
             },
-            aiSummary: aiSummary ?? "AI summary unavailable",
-            codeQuality: codeQuality ?? { score: null, suggestions: [] },
-            security: {
-                risk: "Low",
-                notes: ["Consider rate limiting auth endpoints"],
-            },
-            files: res.data.files.map((f: any) => ({
+            aiSummary,
+            codeQuality,
+            security,
+            canDebug: security.risk !== "none" && security.canAutoFix,
+            files: files.map((f: any) => ({
                 filename: f.filename,
                 additions: f.additions,
                 deletions: f.deletions,
-                patch: f.patch ?? null, // may be null for large diffs
+                patch: f.patch ?? null,
             })),
         };
     }
@@ -712,6 +727,35 @@ export class GithubService {
                     suggestedFix:
                         "Implement streaming file uploads and validate size early.",
                 })),
+        };
+    }
+
+    async debugGithubCommit(
+        integrationId: string,
+        sha: string
+    ): Promise<DebugFixResponse> {
+        const detail = await this.getGithubCommitDetail(integrationId, sha);
+
+        if (!detail.security.canAutoFix) {
+            throw new BadRequestException("No auto-fixable security issues");
+        }
+
+        const fixText = await generateDebugFix({
+            issueTitle: detail.security.summary,
+            recentDiffs: detail.files
+                .map((f: any) => `File: ${f.filename}\n${f.patch ?? ""}`)
+                .join("\n\n"),
+        });
+
+        return {
+            explanation: fixText,
+            patches: [],
+            suggestedCode: null,
+            risk: detail.security.risk as SecurityRisk,
+            confidence: 0.75,
+            safeToApply:
+                detail.security.canAutoFix &&
+                detail.security.risk !== "high",
         };
     }
 }

@@ -104,4 +104,10 @@ export class GithubController {
     getIssues(@Param('id') integrationId: string) {
         return this.githubService.getGithubIssues(integrationId, 10);
     }
+
+    @UseGuards(AuthGuard)
+    @Get('debug/:id/:sha')
+    debugCommit(@Param('id') integrationId: string, @Param('sha') sha: string) {
+        return this.githubService.debugGithubCommit(integrationId, sha);
+    }
 }
