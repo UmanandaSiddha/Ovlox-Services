@@ -1,75 +1,104 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { ExternalProvider, IntegrationAuthType, IntegrationStatus } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
-import { encrypt } from 'src/utils/encryption';
-
+import { signState, verifyState } from 'src/utils/oauth-state';
 
 @Injectable()
-export class DiscordIntegrationService {
-    constructor(private readonly databaseService: DatabaseService) { }
+export class DiscordService {
+    constructor(
+        private readonly databaseService: DatabaseService,
+        private readonly configService: ConfigService,
+    ) { }
 
+    getInstallUrl(orgId: string, integrationId: string) {
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
+        const DISCORD_CLIENT_ID = this.configService.get<string>('DISCORD_CLIENT_ID');
+        const DISCORD_BOT_PERMISSIONS = this.configService.get<string>('DISCORD_BOT_PERMISSIONS');
+        const API_URL = this.configService.get<string>('API_URL');
 
-    getAuthUrl(orgId: string) {
+        const state = signState(
+            INTEGRATION_TOKEN_ENCRYPTION_KEY,
+            JSON.stringify({
+                orgId,
+                integrationId,
+                ts: Date.now()
+            })
+        );
+
         const params = new URLSearchParams({
-            client_id: process.env.DISCORD_CLIENT_ID,
-            redirect_uri: `${process.env.API_URL}/api/v1/integrations/discord/callback`,
-            response_type: 'code',
-            scope: 'bot%20identify%20guilds',
-            state: orgId,
-            permissions: process.env.DISCORD_BOT_PERMISSIONS || '0',
+            client_id: DISCORD_CLIENT_ID,
+            scope: 'bot',
+            permissions: DISCORD_BOT_PERMISSIONS || '68608',
+            redirect_uri: `${API_URL}/api/v1/integrations/discord/callback`,
+            state,
         });
+
         return `https://discord.com/api/oauth2/authorize?${params.toString()}`;
     }
 
-
     async handleCallback(query: any) {
-        const { code, state } = query;
-        if (!code) throw new HttpException('Missing code', HttpStatus.BAD_REQUEST);
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
 
+        const { guild_id, state } = query;
+        if (!guild_id || !state) throw new BadRequestException('Invalid callback');
 
-        const tokenRes = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
-            client_id: process.env.DISCORD_CLIENT_ID,
-            client_secret: process.env.DISCORD_CLIENT_SECRET,
-            grant_type: 'authorization_code',
-            code,
-            redirect_uri: `${process.env.API_URL}/api/v1/integrations/discord/callback`,
-        }).toString(), {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state);
+        if (!payload) throw new BadRequestException('Invalid state');
+
+        const { orgId, integrationId } = JSON.parse(payload);
+
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId }
         });
+        const config = (integration?.config as any) || {};
 
-
-        const data = tokenRes.data;
-        const botToken = data.access_token;
-
-        const integration = await this.databaseService.integration.findFirst({
-            where: { organizationId: state, type: ExternalProvider.DISCORD }
+        await this.databaseService.integration.update({
+            where: { id: integrationId },
+            data: {
+                type: ExternalProvider.DISCORD,
+                authType: IntegrationAuthType.OAUTH,
+                status: IntegrationStatus.CONNECTED,
+                config: {
+                    ...config,
+                    guilds: Array.from(new Set([...(config.guilds || []), guild_id]))
+                }
+            }
         });
-
-        if (integration) {
-            await this.databaseService.integration.update({
-                where: { id: integration.id },
-                data: {
-                    status: IntegrationStatus.CONNECTED,
-                    config: {
-                        token: encrypt(process.env.INTEGRATION_TOKEN_ENCRYPTION_KEY, botToken)
-                    }
-                }
-            })
-        } else {
-            await this.databaseService.integration.create({
-                data: {
-                    organizationId: state,
-                    type: ExternalProvider.DISCORD,
-                    authType: IntegrationAuthType.OAUTH,
-                    status: IntegrationStatus.CONNECTED,
-                    config: {
-                        token: encrypt(process.env.INTEGRATION_TOKEN_ENCRYPTION_KEY, botToken)
-                    }
-                }
-            })
-        }
 
         return true;
+    }
+
+    async fetchGuildChannels(guildId: string) {
+        const DISCORD_BOT_TOKEN = this.configService.get<string>('DISCORD_BOT_TOKEN');
+
+        const res = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+            headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` }
+        });
+
+        return res.data.filter((c: any) => c.type === 0);
+    }
+
+    async ingestChannelHistory(channelId: string) {
+        const DISCORD_BOT_TOKEN = this.configService.get<string>('DISCORD_BOT_TOKEN');
+
+        let before: string | undefined;
+
+        while (true) {
+            const res = await axios.get(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+                headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+                params: { limit: 100, before }
+            });
+
+            const messages = res.data;
+            if (!messages.length) break;
+
+            for (const m of messages) {
+                // create RawEvent here
+            }
+
+            before = messages[messages.length - 1].id;
+        }
     }
 }

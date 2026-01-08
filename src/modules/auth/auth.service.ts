@@ -24,7 +24,7 @@ export class AuthService {
 
 	constructor(
 		private readonly databaseService: DatabaseService,
-		private readonly config: ConfigService,
+		private readonly configService: ConfigService,
 		private readonly jwtService: JwtService,
 	) { }
 
@@ -33,7 +33,7 @@ export class AuthService {
 	// Verify user by token
 	async validateUserByToken(token: string): Promise<User> {
 		try {
-			const secret = this.config.get<string>('ACCESS_TOKEN_SECRET');
+			const secret = this.configService.get<string>('ACCESS_TOKEN_SECRET');
 			const payload: { id: string } = await this.jwtService.verifyAsync(token, { secret });
 			const user = await this.databaseService.user.findUnique({ where: { id: payload.id } });
 			if (!user) throw new UnauthorizedException('Invalid user.');

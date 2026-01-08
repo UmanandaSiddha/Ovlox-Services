@@ -17,6 +17,7 @@ import { LlmModule } from './modules/llm/llm.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
+import { GithubModule } from './modules/providers/github/github.module';
 
 @Module({
 	imports: [
@@ -36,7 +37,8 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 		LlmModule,
 		WebhooksModule,
 		JobsModule,
-		IntegrationsModule
+		IntegrationsModule,
+		GithubModule
 	],
 	controllers: [AppController],
 	providers: [AppService, AppGateway],

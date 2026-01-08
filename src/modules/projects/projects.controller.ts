@@ -7,7 +7,7 @@ import { AuthGuard } from '../auth/guards/auth.guard';
 export class ProjectsController {
     constructor(private projects: ProjectsService) { }
 
-    @Post()
+    @Post('create')
     async create(@Req() req: any, @Body() body: { organizationId: string; name: string; description?: string }) {
         return this.projects.create({ ...body, createdBy: req.user.userId });
     }

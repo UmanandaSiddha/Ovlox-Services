@@ -40,7 +40,7 @@ export class UserController {
 
     // USER BY ID
     @Roles(UserRole.ADMIN)
-    @Get('user/:id')
+    @Get('byId/:id')
     getUserById(@Param('id') id: string) {
         return this.userService.getUserById(id);
     }

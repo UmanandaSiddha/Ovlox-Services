@@ -195,6 +195,7 @@ model Organization {
     updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
     // Relations
+    providers       Provider[]
     members         OrganizationMember[]
     projects        Project[]
     integrations    Integration[]
@@ -203,6 +204,22 @@ model Organization {
     identities      Identity[]
     contributorMaps ContributorMap[]
     ingestionJobs   IngestionJob[]
+}
+
+model Provider {
+    id             String           @id @default(uuid())
+    organizationId String
+    provider       ExternalProvider
+    providerUserId String
+    identifier     String
+    accessToken    String
+    config         Json?
+    scope          String?
+    createdAt      DateTime         @default(now()) @map("created_at")
+    updatedAt      DateTime         @default(now()) @updatedAt @map("updated_at")
+    organization   Organization     @relation(fields: [organizationId], references: [id])
+
+    @@unique([provider, providerUserId, organizationId])
 }
 
 enum OrgMemberStatus {
@@ -221,6 +238,7 @@ model OrganizationMember {
     roleId         String?
     role           RoleTemplate?      @relation(fields: [roleId], references: [id])
     status         OrgMemberStatus    @default(ACTIVE)
+    isSelected     Boolean            @default(false)
     invitedBy      String?
     createdAt      DateTime           @default(now()) @map("created_at")
     updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
@@ -333,20 +351,24 @@ enum IntegrationStatus {
 }
 
 model Integration {
-    id             String              @id @default(uuid())
-    organization   Organization        @relation(fields: [organizationId], references: [id])
-    organizationId String
-    type           ExternalProvider
-    authType       IntegrationAuthType
-    config         Json?
-    status         IntegrationStatus   @default(CONNECTED)
-    createdAt      DateTime            @default(now()) @map("created_at")
-    updatedAt      DateTime            @default(now()) @updatedAt @map("updated_at")
+    id                String              @id @default(uuid())
+    organization      Organization        @relation(fields: [organizationId], references: [id])
+    organizationId    String
+    type              ExternalProvider
+    authType          IntegrationAuthType
+    config            Json?
+    externalAccountId String? // GitHub installationId
+    externalAccount   String? // github login/org name
+    status            IntegrationStatus   @default(CONNECTED)
+    createdAt         DateTime            @default(now()) @map("created_at")
+    updatedAt         DateTime            @default(now()) @updatedAt @map("updated_at")
 
     connections   IntegrationConnection[]
     rawEvents     RawEvent[]
     resources     IntegrationResource[] // detected/imported resources (repos, channels)
     ingestionJobs IngestionJob[]
+
+    @@index([type, externalAccountId])
 }
 
 model IntegrationConnection {

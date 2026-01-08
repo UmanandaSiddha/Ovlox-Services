@@ -1,79 +1,107 @@
-import { Controller, Get, Query, Res, HttpException, HttpStatus, Post, HttpCode, Req, Headers, Body } from '@nestjs/common';
-import { Request, Response } from 'express';
-import { GithubIntegrationService } from './github.service';
-import { DatabaseService } from 'src/services/database/database.service';
-import * as crypto from 'crypto';
+import { Controller, Get, Query, Res, HttpException, HttpStatus, Post, HttpCode, Headers, Body, Param, UseGuards, BadRequestException } from '@nestjs/common';
+import { Response } from 'express';
+import { verifyState } from 'src/utils/oauth-state';
+import { AuthGuard } from 'src/modules/auth/guards/auth.guard';
+import { ConfigService } from '@nestjs/config';
+import { GithubService } from './github.service';
 
-@Controller('integrations/github')
-export class GithubIntegrationController {
+@Controller('github')
+export class GithubController {
     constructor(
-        private readonly github: GithubIntegrationService,
-        private readonly databaseService: DatabaseService
+        private readonly githubService: GithubService,
+        private readonly configService: ConfigService
     ) { }
 
-    @Get('install')
-    install(@Query('orgId') orgId: string, @Res() res: Response) {
-        if (!orgId) throw new HttpException('orgId required', HttpStatus.BAD_REQUEST);
-        const url = this.github.getInstallUrl(orgId);
-        return res.redirect(url);
+
+    @UseGuards(AuthGuard)
+    @Get('oauth/:id')
+    getOauthUrl(@Param('id') orgId: string) {
+        return this.githubService.getOAuthUrl(orgId);
+    }
+
+    @UseGuards(AuthGuard)
+    @Get('install/:id')
+    getInstallUrl(@Param('id') orgId: string) {
+        return this.githubService.getInstallUrl(orgId);
     }
 
     @Get('callback')
-    async callback(@Query('installation_id') installationId: string, @Query('setup_action') setupAction: string, @Query('state') state: string, @Res() res: Response) {
-        if (!installationId) throw new HttpException('installation_id required', HttpStatus.BAD_REQUEST);
+    @HttpCode(200)
+    async callback(
+        @Query('code') code: string,
+        @Query('state') state?: string,
+        @Query('installation_id') installation_id?: string,
+        @Query('setup_action') setup_action?: string
+    ) {
+        if (installation_id) {
+            console.log("installation_id : ", installation_id);
+            console.log("setup_action : ", setup_action);
 
-        try {
-            const orgId = state;
-            await this.github.handleInstallation(installationId, orgId, setupAction);
-
-            const frontend = process.env.FRONTEND_URL || 'http://localhost:3000';
-            return res.redirect(`${frontend}/organizations/${orgId}/setup?connected=github`);
-        } catch (err) {
-            console.error(err);
-            throw new HttpException('GitHub callback handling failed', HttpStatus.INTERNAL_SERVER_ERROR);
+            return 'ok';
         }
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
+        const FRONTEND_URL = this.configService.get<string>('FRONTEND_URL');
+
+        if (!INTEGRATION_TOKEN_ENCRYPTION_KEY || !FRONTEND_URL) {
+            throw new BadRequestException("Something went wrong");
+        }
+
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state);
+        if (!payload) throw new HttpException('Invalid state', HttpStatus.BAD_REQUEST);
+
+        const { orgId } = JSON.parse(payload);
+
+        await this.githubService.handleOAuthCallback(code, orgId);
+
+        return 'ok';
     }
 
     @Post('webhook')
     @HttpCode(200)
-    async handle(@Req() req: Request, @Res() res: Response, @Headers('x-hub-signature-256') signature: string, @Body() body: any) {
-        const secret = process.env.GITHUB_WEBHOOK_SECRET || '';
-        const raw = JSON.stringify(body);
-        const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
+    async webhook(
+        @Headers('x-hub-signature-256') signature: string,
+        @Headers('x-github-event') event: string,
+        @Body() body: any
+    ) {
+        this.githubService.verifySignature(body, signature);
+        await this.githubService.handleWebhook(event, body);
 
-        try {
-            const sigBuf = Buffer.from(signature || '');
-            const expBuf = Buffer.from(expected);
-            if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-                console.warn('Invalid GitHub webhook signature');
-                return res.status(401).send('Invalid signature');
-            }
-        } catch (err) {
-            return res.status(401).send('Invalid signature');
-        }
+        return 'ok';
+    }
 
-        const providerEventId = body.installation ? String(body.installation.id) : undefined;
-        await this.databaseService.webhookEvent.create({ data: { provider: 'GITHUB', providerEventId, payload: body } });
+    @UseGuards(AuthGuard)
+    @Get('repo/:id')
+    getInstallationRepos(@Param('id') integrationId: string) {
+        return this.githubService.fetchInstallationRepos(integrationId);
+    }
 
-        const event = req.headers['x-github-event'] as string;
-        if (event === 'push') {
-            const head = body.head_commit;
-            await this.databaseService.rawEvent.create({
-                data: {
-                    projectId: null,
-                    integrationId: null,
-                    source: 'GITHUB',
-                    sourceId: body.after,
-                    eventType: 'COMMIT',
-                    authorName: head?.author?.name || null,
-                    authorEmail: head?.author?.email || null,
-                    timestamp: new Date(head?.timestamp || Date.now()),
-                    content: head?.message || null,
-                    metadata: body,
-                },
-            });
-        }
+    @UseGuards(AuthGuard)
+    @Get('overview/:id')
+    getRepoOverview(@Param('id') integrationId: string) {
+        return this.githubService.getGithubOverview(integrationId);
+    }
 
-        return res.send('ok');
+    @UseGuards(AuthGuard)
+    @Get('commits/:id')
+    getCommits(@Param('id') integrationId: string) {
+        return this.githubService.getGithubCommits(integrationId, 10);
+    }
+
+    @UseGuards(AuthGuard)
+    @Get('commit/details/:id/:sha')
+    getCommitDetails(@Param('id') integrationId: string, @Param('sha') sha: string) {
+        return this.githubService.getGithubCommitDetail(integrationId, sha);
+    }
+
+    @UseGuards(AuthGuard)
+    @Get('pull-requests/:id')
+    getPullRequests(@Param('id') integrationId: string) {
+        return this.githubService.getGithubPullRequests(integrationId, 10);
+    }
+
+    @UseGuards(AuthGuard)
+    @Get('issues/:id')
+    getIssues(@Param('id') integrationId: string) {
+        return this.githubService.getGithubIssues(integrationId, 10);
     }
 }
