@@ -89,6 +89,126 @@ enum TaskStatus {
     BLOCKED
 }
 
+enum ChatRole {
+    USER
+    ASSISTANT
+    SYSTEM
+}
+
+enum FeatureStatus {
+    DISCOVERED // Newly detected
+    IN_PROGRESS // Work ongoing
+    REVIEW // Under review
+    COMPLETED // Feature complete
+    BLOCKED // Blocked
+    CANCELLED // Cancelled
+}
+
+enum SentimentPeriod {
+    DAILY
+    WEEKLY
+    MONTHLY
+}
+
+enum SemanticIntent {
+    FIX_ISSUE // User mentions fixing an issue
+    FEATURE_IN_PROGRESS // User mentions working on a feature
+    FEATURE_COMPLETE // User indicates feature is done
+    BLOCKER // User mentions a blocker
+    QUESTION // User asking about something
+    DECISION // User making a decision
+    UPDATE // User providing an update
+    REVIEW_REQUEST // User requesting review
+    OTHER // Other semantic meaning
+}
+
+enum LlmOutputType {
+    SUMMARY // Single event summary
+    ANSWER // Chat answer
+    DAILY_REPORT // Daily project report
+    WEEKLY_REPORT // Weekly project report
+    RISK_ALERT // Security/risk alert
+    FEATURE_SCORE // Feature completion score
+    SENTIMENT_INSIGHT // Sentiment analysis insight
+    CODE_QUALITY // Code quality analysis
+    SECURITY_ANALYSIS // Security analysis
+}
+
+enum ReportType {
+    DAILY
+    WEEKLY
+    MONTHLY
+    CUSTOM
+}
+
+enum CreditTransactionType {
+    PURCHASE // Credits purchased via Stripe
+    REFUND // Credits refunded
+    USAGE // Credits consumed for LLM operations
+    BONUS // Free credits granted
+    ADJUSTMENT // Manual adjustment by admin
+    SUBSCRIPTION // Credits added via subscription
+    EXPIRY // Credits expired
+}
+
+enum CreditTransactionStatus {
+    PENDING // Transaction pending (payment processing)
+    COMPLETED // Transaction completed successfully
+    FAILED // Transaction failed
+    REFUNDED // Transaction refunded
+    CANCELLED // Transaction cancelled
+}
+
+enum PaymentStatus {
+    PENDING // Payment pending
+    PROCESSING // Payment processing
+    SUCCEEDED // Payment succeeded
+    FAILED // Payment failed
+    REFUNDED // Payment refunded
+    CANCELLED // Payment cancelled
+}
+
+enum SubscriptionStatus {
+    ACTIVE
+    CANCELLED
+    PAST_DUE
+    UNPAID
+    TRIALING
+}
+
+enum LlmOperationType {
+    EVENT_SUMMARY // Summarize RawEvent
+    CODE_QUALITY // Analyze code quality
+    SECURITY_ANALYSIS // Security risk analysis
+    SENTIMENT_ANALYSIS // Semantic understanding of messages
+    CHAT_ANSWER // RAG chatbot answer
+    FEATURE_DETECTION // Auto-detect features from commits/PRs
+    PROJECT_REPORT // Generate project report
+    EMBEDDING // Generate embeddings
+    DEBUG_FIX // Generate debug fix
+}
+
+enum LlmUsageStatus {
+    PENDING // Operation pending
+    COMPLETED // Operation completed successfully
+    FAILED // Operation failed
+    CANCELLED // Operation cancelled
+}
+
+enum ConversationType {
+    ORG // Organization-level chat
+    PROJECT // Project-level chat
+    DIRECT // Individual/1-on-1 chat between two users
+    TASK_TEAM // Task team-level chat
+    RAG_CHAT // RAG chatbot conversation (existing)
+}
+
+enum TaskSource {
+    MANUAL // Manually created by user
+    AUTO_DETECTED // Auto-detected from commits/PRs/issues/messages
+    IMPORTED // Imported from external provider (Jira, Notion, etc.)
+}
+
 /// ------------------ Models ------------------
 
 model User {
@@ -114,16 +234,25 @@ model User {
     updatedAt        DateTime       @default(now()) @updatedAt @map("updated_at")
 
     // Relations
-    sessions        Session[]
-    projects        Project[]
-    memberships     OrganizationMember[]
-    invites         Invite[]
-    llmOutputs      LlmOutput[]
-    organizations   Organization[] // organizations owned by this user (owner role)
-    identities      Identity[] // external identities (github/slack/discord)
-    aliases         IdentityAlias[] // nicknames created by owner/admin mapping
-    roleTemplates   RoleTemplate[]
-    contributorMaps ContributorMap[]
+    sessions                    Session[]
+    projects                    Project[]
+    memberships                 OrganizationMember[]
+    invites                     Invite[]
+    llmOutputs                  LlmOutput[]
+    organizations               Organization[] // organizations owned by this user (owner role)
+    identities                  Identity[] // external identities (github/slack/discord)
+    aliases                     IdentityAlias[] // nicknames created by owner/admin mapping
+    roleTemplates               RoleTemplate[]
+    contributorMaps             ContributorMap[]
+    conversations               Conversation[] // Conversations created by user
+    conversationParticipants    ConversationParticipant[] // Conversations user participates in
+    chatMessages                ChatMessage[] // Messages sent by user
+    chatMentions                ChatMention[] // Where user is mentioned
+    taskAssignments             TaskAssignment[] // Tasks assigned by user
+    features                    Feature[]
+    projectReports              ProjectReport[]
+    processedCreditTransactions CreditTransaction[] // Credit transactions processed by this user
+    auditLogs                   AuditLog[] // Audit logs for actions by this user
 }
 
 model AuthIdentity {
@@ -160,14 +289,17 @@ model Identity {
     rawProfile      Json? // raw provider information (profile)
     createdAt       DateTime         @default(now()) @map("created_at")
     updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
-    linkedUserId    String?
+    linkedUserId    String? // Optional link to User (for platform-level mapping)
     linkedUser      User?            @relation(fields: [linkedUserId], references: [id], onDelete: SetNull)
-    organizationId  String?
+    organizationId  String? // Organization this identity belongs to
     organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-    identityAlias   IdentityAlias[]
-    contributorMaps ContributorMap[]
+    identityAlias   IdentityAlias[] // Nicknames assigned by admins
+    contributorMaps ContributorMap[] // Maps to OrganizationMember for contribution tracking
+    rawEvents       RawEvent[] // Events authored by this identity
 
+    @@unique([organizationId, provider, providerUserId], name: "uq_identity_org_provider_user")
     @@index([provider, providerUserId], map: "idx_identity_provider_user")
+    @@index([organizationId])
 }
 
 model IdentityAlias {
@@ -185,25 +317,36 @@ model IdentityAlias {
 }
 
 model Organization {
-    id        String   @id @default(uuid())
-    name      String
-    slug      String   @unique
-    ownerId   String
-    owner     User     @relation(fields: [ownerId], references: [id])
-    plan      String?
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+    id            String   @id @default(uuid())
+    name          String
+    slug          String   @unique
+    ownerId       String
+    owner         User     @relation(fields: [ownerId], references: [id])
+    plan          String? // Subscription plan name (e.g., "free", "pro", "enterprise") - Should link to Subscription.planName
+    creditBalance Decimal  @default(0) @db.Decimal(15, 2) // Current credit balance - MUST use database transactions with row-level locking when updating to prevent race conditions
+    creditLimit   Decimal? @db.Decimal(15, 2) // Credit limit (for subscriptions with credit allowance) - Enforce creditBalance <= creditLimit in application logic
+    version       Int      @default(0) // Optimistic locking version for credit balance updates
+    createdAt     DateTime @default(now()) @map("created_at")
+    updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
 
     // Relations
-    providers       Provider[]
-    members         OrganizationMember[]
-    projects        Project[]
-    integrations    Integration[]
-    invites         Invite[]
-    roleTemplates   RoleTemplate[]
-    identities      Identity[]
-    contributorMaps ContributorMap[]
-    ingestionJobs   IngestionJob[]
+    providers          Provider[]
+    members            OrganizationMember[]
+    projects           Project[]
+    integrations       Integration[]
+    invites            Invite[]
+    roleTemplates      RoleTemplate[]
+    identities         Identity[]
+    contributorMaps    ContributorMap[]
+    ingestionJobs      IngestionJob[]
+    conversations      Conversation[] // Organization-level chats
+    creditTransactions CreditTransaction[] // All credit transactions
+    stripeCustomer     StripeCustomer? // Stripe customer record
+    payments           Payment[] // Payment records
+    subscriptions      Subscription[] // Active subscriptions
+    llmUsages          LlmUsage[] // LLM operation usage tracking
+    webhookEvents      WebhookEvent[] // Webhook events for this organization
+    auditLogs          AuditLog[] // Audit logs for this organization
 }
 
 model Provider {
@@ -229,21 +372,30 @@ enum OrgMemberStatus {
 }
 
 model OrganizationMember {
-    id             String             @id @default(uuid())
-    organization   Organization       @relation(fields: [organizationId], references: [id])
-    organizationId String
-    user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-    userId         String
-    predefinedRole PredefinedOrgRole?
-    roleId         String?
-    role           RoleTemplate?      @relation(fields: [roleId], references: [id])
-    status         OrgMemberStatus    @default(ACTIVE)
-    isSelected     Boolean            @default(false)
-    invitedBy      String?
-    createdAt      DateTime           @default(now()) @map("created_at")
-    updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
-    identityMaps   ContributorMap[]
-    tasks          Task[]
+    id                       String                    @id @default(uuid())
+    organization             Organization              @relation(fields: [organizationId], references: [id])
+    organizationId           String
+    user                     User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId                   String
+    predefinedRole           PredefinedOrgRole?
+    roleId                   String?
+    role                     RoleTemplate?             @relation(fields: [roleId], references: [id])
+    status                   OrgMemberStatus           @default(ACTIVE)
+    isSelected               Boolean                   @default(false)
+    invitedBy                String?
+    createdAt                DateTime                  @default(now()) @map("created_at")
+    updatedAt                DateTime                  @default(now()) @updatedAt @map("updated_at")
+    identityMaps             ContributorMap[]
+    taskAssignments          TaskAssignment[] // Task assignments for this member
+    completedTasks           Task[]                    @relation("TaskCompletedBy") // Tasks completed by this member (for contribution tracking)
+    autoDetectedTasks        Task[]                    @relation("TaskAutoDetectedBy") // Tasks auto-detected from this member's work (for contribution tracking)
+    taskTeamMembers          TaskTeamMember[] // Team memberships for tasks
+    rawEvents                RawEvent[] // Events authored by this member (commits, PRs, messages, Jira updates)
+    completedFeatures        Feature[] // Features completed by this member (for contribution tracking)
+    autoDetectedFeatures     Feature[]                 @relation("FeatureAutoDetectedBy") // Features auto-detected from this member's work (for contribution tracking)
+    chatMessages             ChatMessage[] // Messages sent by this member (as senderMember)
+    chatMentions             ChatMention[] // Where this member is mentioned
+    conversationParticipants ConversationParticipant[] // Conversations this member participates in
 
     @@index([organizationId, userId], name: "idx_org_member")
 }
@@ -330,11 +482,15 @@ model Project {
     createdAt      DateTime     @default(now()) @map("created_at")
     updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at")
 
-    integrations  IntegrationConnection[]
-    rawEvents     RawEvent[]
-    llmOutputs    LlmOutput[]
-    tasks         Task[]
-    ingestionJobs IngestionJob[]
+    integrations     IntegrationConnection[]
+    rawEvents        RawEvent[]
+    llmOutputs       LlmOutput[]
+    tasks            Task[]
+    ingestionJobs    IngestionJob[]
+    conversations    Conversation[]
+    features         Feature[]
+    sentimentReports SentimentReport[]
+    projectReports   ProjectReport[]
 }
 
 enum IntegrationAuthType {
@@ -367,6 +523,7 @@ model Integration {
     rawEvents     RawEvent[]
     resources     IntegrationResource[] // detected/imported resources (repos, channels)
     ingestionJobs IngestionJob[]
+    webhookEvents WebhookEvent[] // Webhook events for this integration
 
     @@index([type, externalAccountId])
 }
@@ -420,102 +577,233 @@ model ContributorMap {
 }
 
 model Task {
-    id          String              @id @default(uuid())
-    project     Project             @relation(fields: [projectId], references: [id])
-    projectId   String
-    provider    ExternalProvider?
-    providerId  String?
-    title       String
-    description String?
-    assigneeId  String?
-    assignee    OrganizationMember? @relation(fields: [assigneeId], references: [id])
-    status      TaskStatus          @default(TODO)
-    priority    Int?
-    dueDate     DateTime?
-    createdAt   DateTime            @default(now()) @map("created_at")
-    updatedAt   DateTime            @default(now()) @updatedAt @map("updated_at")
-    metadata    Json?
+    id                     String              @id @default(uuid())
+    project                Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    projectId              String
+    provider               ExternalProvider? // Source provider (GITHUB, JIRA, etc.)
+    providerId             String? // External task ID (e.g., Jira ticket ID, GitHub issue number)
+    source                 TaskSource          @default(MANUAL) // How task was created
+    autoDetectedFrom       RawEvent?           @relation(fields: [autoDetectedFromId], references: [id], onDelete: SetNull)
+    autoDetectedFromId     String?             @unique // RawEvent that triggered auto-detection (one-to-one)
+    autoDetectedByMemberId String? // OrganizationMember whose work triggered auto-detection (derived from autoDetectedFrom.authorMemberId)
+    autoDetectedByMember   OrganizationMember? @relation("TaskAutoDetectedBy", fields: [autoDetectedByMemberId], references: [id], onDelete: SetNull)
+    title                  String
+    description            String?
+    status                 TaskStatus          @default(TODO)
+    priority               Int?
+    dueDate                DateTime?
+    completedAt            DateTime? // When task was marked as completed
+    completedByMemberId    String? // OrganizationMember who completed the task (for contribution tracking)
+    completedByMember      OrganizationMember? @relation("TaskCompletedBy", fields: [completedByMemberId], references: [id], onDelete: SetNull)
+    completionDeadline     DateTime? // Deadline for completion (different from dueDate)
+    isOverdue              Boolean             @default(false) // Calculated: completionDeadline < now && status != DONE
+    assignedTo             TaskAssignment[] // Can be assigned to individuals or teams - Validation: isActive=true requires assigneeId OR teamId
+    rawEvents              TaskRawEvent[] // RawEvents related to this task (commits, PRs, messages)
+    taskTeam               TaskTeam? // Task team (if team was created for this task)
+    conversation           Conversation? // Task team chat conversation (Conversation with type=TASK_TEAM and taskId=this.id)
+    metadata               Json? // Team contributions, progress tracking, etc.
+    createdAt              DateTime            @default(now()) @map("created_at")
+    updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+
+    @@index([projectId, status])
+    @@index([dueDate])
+    @@index([completionDeadline])
+    @@index([isOverdue, status])
+    @@index([autoDetectedFromId])
+    @@index([autoDetectedByMemberId]) // For contribution tracking queries
+    @@index([completedByMemberId]) // For contribution tracking queries
+}
+
+/// Task assignment - can assign to individual members or create team assignments
+model TaskAssignment {
+    id           String              @id @default(uuid())
+    task         Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
+    taskId       String
+    assigneeId   String? // Individual assignee (OrganizationMember) - Validation: if isActive=true, then assigneeId OR teamId must be set
+    assignee     OrganizationMember? @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+    teamId       String? // Team assignment (if assigned to team)
+    team         TaskTeam?           @relation(fields: [teamId], references: [id], onDelete: SetNull)
+    assignedById String // User who made the assignment
+    assignedBy   User                @relation(fields: [assignedById], references: [id])
+    assignedAt   DateTime            @default(now())
+    unassignedAt DateTime? // When assignment was removed
+    isActive     Boolean             @default(true) // Validation: isActive=true requires (assigneeId IS NOT NULL OR teamId IS NOT NULL)
+
+    @@index([taskId, isActive])
+    @@index([assigneeId, isActive])
+    @@index([teamId, isActive])
+}
+
+/// Task teams - dynamic teams created for specific tasks
+model TaskTeam {
+    id              String           @id @default(uuid())
+    task            Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+    taskId          String           @unique
+    name            String // Team name (e.g., "Auth Feature Team")
+    members         TaskTeamMember[] // Team members
+    taskAssignments TaskAssignment[] // Assignment records
+    // Note: Task team chat is accessed via Task.conversationId (Conversation with type TASK_TEAM)
+    metadata        Json? // Team contributions, roles, etc.
+    createdAt       DateTime         @default(now()) @map("created_at")
+    updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+}
+
+model TaskTeamMember {
+    id            String             @id @default(uuid())
+    team          TaskTeam           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+    teamId        String
+    member        OrganizationMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+    memberId      String
+    role          String? // Optional role in team (e.g., "lead", "developer")
+    contributions Json? // Contributions tracking (commits, messages, etc.)
+    addedAt       DateTime           @default(now())
+    removedAt     DateTime?
+
+    @@unique([teamId, memberId])
+    @@index([teamId])
+    @@index([memberId])
+}
+
+/// Link RawEvents to Tasks (when events mention or relate to tasks)
+model TaskRawEvent {
+    id           String   @id @default(uuid())
+    task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+    taskId       String
+    rawEvent     RawEvent @relation(fields: [rawEventId], references: [id], onDelete: Cascade)
+    rawEventId   String
+    relationship String // "MENTIONED", "PROGRESS", "COMPLETED", "BLOCKED", "RELATED"
+    relevance    Float    @default(1.0) // How relevant this event is to the task
+    createdAt    DateTime @default(now())
+
+    @@unique([taskId, rawEventId])
+    @@index([taskId])
+    @@index([rawEventId])
 }
 
 /// Raw events normalized from providers (historical import + webhooks)
+/// IMPORTANT: This stores metadata and summaries, NOT full code patches/diffs.
+/// For GitHub commits: sourceId = commit SHA (e.g., "abc123..."), used to fetch patches from GitHub API when viewing.
+/// For other providers: sourceId = unique identifier (Slack message ID, Jira issue key, etc.)
+/// Embeddings are saved at LLM processing time via ContentChunk model.
 model RawEvent {
-    id               String           @id @default(uuid())
-    project          Project          @relation(fields: [projectId], references: [id])
-    projectId        String
-    integration      Integration      @relation(fields: [integrationId], references: [id])
+    id               String              @id @default(uuid())
+    project          Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+    projectId        String? // Optional - events might come from webhooks before project mapping
+    // NOTE: After ingestion, events should be assigned to projects via IntegrationConnection
+    integration      Integration         @relation(fields: [integrationId], references: [id])
     integrationId    String
     resourceId       String? // IntegrationResource.providerId (repo or channel id) — helps correlate
     source           ExternalProvider
-    sourceId         String // provider-specific unique id for the event (commit sha, message id, pr id)
+    sourceId         String // Provider-specific unique identifier:
+    // - GitHub: commit SHA or PR/issue number
+    // - Slack: message timestamp ID
+    // - Discord: message ID (snowflake)
+    // - Jira: issue key (e.g., "PROJ-123")
+    // - Notion: page/block ID
+    // Used to fetch full details/patches from provider API when viewing dashboard
     eventType        RawEventType
-    authorIdentityId String? // Identity.id of the author (if known)
-    authorName       String?
-    authorEmail      String?
+    authorIdentityId String? // Identity.id of the author (external provider identity)
+    authorIdentity   Identity?           @relation(fields: [authorIdentityId], references: [id], onDelete: SetNull)
+    authorMemberId   String? // OrganizationMember.id - resolved via ContributorMap for contribution tracking
+    authorMember     OrganizationMember? @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
+    authorName       String? // Fallback display name from provider
+    authorEmail      String? // Fallback email from provider
     timestamp        DateTime
-    content          String?
-    metadata         Json? // raw payload or parsed attributes (e.g. diff stat)
-    snapshotUrl      String? // s3 link for large blobs (diff, file snapshots)
-    ingestedAt       DateTime         @default(now())
-    processedByLLM   Boolean          @default(false) // set true after AI generates summary and embeddings
+    content          String? // Summary/description - NOT full code patches (patches fetched from provider using sourceId)
+    metadata         Json? // Provider-specific metadata. For GitHub commits: { filesChanged, additions, deletions, repo, diffUrl, complexity }.
+    // For other providers: provider-specific attributes. Actual patches/diffs NOT stored.
+    snapshotUrl      String? // Optional: s3 link for large blobs (only if absolutely necessary, prefer fetching from provider)
+    ingestedAt       DateTime            @default(now())
+    processedByLLM   Boolean             @default(false) // set true after AI generates summary and embeddings
     processingError  String?
-    codeChanges      CodeChange[]
-    createdAt        DateTime         @default(now()) @map("created_at")
-    updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
+    // NOTE: Embeddings are saved at LLM processing time via ContentChunk model
+    // Code patches/diffs are NOT stored - fetched from provider API (GitHub, etc.) using sourceId when viewing
+
+    // Message-specific fields for Slack/Discord
+    channelId       String? // Slack/Discord channel ID
+    channelName     String? // Channel name for display
+    threadId        String? // Thread ID for threaded messages
+    parentMessageId String? // Parent message ID for replies
+    messageType     String? // 'message', 'thread_reply', etc.
+
+    // Semantic Understanding (what the message/event means about the project, not emotional sentiment)
+    semanticIntent     SemanticIntent? // What the user is communicating (FIX_ISSUE, FEATURE_COMPLETE, etc.)
+    semanticSummary    String? // LLM-generated: what issue/feature/topic is being discussed (e.g., "User mentions fixing authentication bug")
+    referencedIssueIds Json? // Array of issue/PR IDs mentioned (e.g., ["#123", "#456"])
+    // referencedFeatureIds is handled via FeatureEvent relation
+
+    // Relations
     llmOutputs       LlmOutput[]
+    features         FeatureEvent[] // Feature linkage
+    chatSources      ChatMessageSource[] // Chat message sources that reference this event
+    contentChunks    ContentChunk[] // Content chunks for embedding (embeddings saved here at LLM processing time)
+    taskRawEvents    TaskRawEvent[] // Tasks related to this event
+    autoDetectedTask Task? // Task auto-detected from this event
+    createdAt        DateTime            @default(now()) @map("created_at")
+    updatedAt        DateTime            @default(now()) @updatedAt @map("updated_at")
 
     @@index([projectId, source, sourceId], name: "idx_rawevent_src_id")
-}
-
-/// CodeChange for commit-like events (useful for diffs)
-model CodeChange {
-    id            String   @id @default(uuid())
-    rawEvent      RawEvent @relation(fields: [rawEventId], references: [id])
-    rawEventId    String
-    repo          String
-    commitSha     String
-    commitMessage String?
-    diffUrl       String?
-    filesChanged  Int?
-    additions     Int?
-    deletions     Int?
-    complexity    Float?
-    createdAt     DateTime @default(now()) @map("created_at")
-    updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+    @@index([projectId]) // Index for optional projectId
+    @@index([authorIdentityId]) // Index for identity lookups
+    @@index([authorMemberId]) // Index for member contribution tracking
+    @@index([source, sourceId]) // For provider API lookups (e.g., GitHub commit SHA lookup)
 }
 
 /// LLM outputs & summaries (one per event or aggregated reports)
 model LlmOutput {
-    id          String      @id @default(uuid())
-    project     Project     @relation(fields: [projectId], references: [id])
+    id          String        @id @default(uuid())
+    project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
     projectId   String
     rawEventId  String?
-    rawEvent    RawEvent?   @relation(fields: [rawEventId], references: [id])
-    type        String // summary, answer, daily_report, risk_alert, feature_score
+    rawEvent    RawEvent?     @relation(fields: [rawEventId], references: [id], onDelete: SetNull)
+    type        LlmOutputType // Changed from String to enum
     content     String
     model       String?
     prompt      String?
     createdById String? // user who triggered, or null for system
-    createdBy   User?       @relation(fields: [createdById], references: [id])
-    createdAt   DateTime    @default(now())
-    updatedAt   DateTime    @default(now()) @updatedAt
-    embeddings  Embedding[]
-    metadata    Json? // e.g. score, tags
+    createdBy   User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+    createdAt   DateTime      @default(now())
+    updatedAt   DateTime      @default(now()) @updatedAt
+
+    // Relations
+    embeddings    Embedding[]
+    metadata      Json? // e.g. score, tags
+    contentChunks ContentChunk[] // Content chunks from this output
+    chatSources   ChatMessageSource[] // Chat messages that reference this output
+    projectReport ProjectReport? // Back-reference from ProjectReport (one-to-one)
 }
 
 /// Embedding reference for vector DB
+/// VALIDATION: Either llmOutputId OR contentChunkId must be set (enforce in application logic)
 model Embedding {
-    id          String    @id @default(uuid())
-    llmOutput   LlmOutput @relation(fields: [llmOutputId], references: [id])
-    llmOutputId String
-    vectorRef   String // external vector DB id or pgvector id mapping
-    dimension   Int?
-    createdAt   DateTime  @default(now())
-    updatedAt   DateTime  @default(now()) @updatedAt
+    id String @id @default(uuid())
+
+    // Can be linked to either LlmOutput OR ContentChunk (for RawEvent embedding)
+    // Validation: exactly one of llmOutputId or contentChunkId must be non-null
+    llmOutput   LlmOutput? @relation(fields: [llmOutputId], references: [id], onDelete: Cascade)
+    llmOutputId String?
+
+    contentChunk   ContentChunk? @relation(fields: [contentChunkId], references: [id], onDelete: Cascade)
+    contentChunkId String?
+
+    vectorRef String // pgvector ID or external vector DB ID
+    dimension Int // Embedding dimension
+    model     String? // Embedding model used (e.g., "text-embedding-3-small")
+    createdAt DateTime @default(now())
+    updatedAt DateTime @default(now()) @updatedAt
+
+    @@index([llmOutputId])
+    @@index([contentChunkId])
+    @@index([vectorRef]) // For quick lookup
 }
 
 /// Webhook raw storage and dedupe
 model WebhookEvent {
     id              String           @id @default(uuid())
+    organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+    organizationId  String? // Organization this webhook belongs to (for better tracking)
+    integration     Integration?     @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+    integrationId   String? // Integration this webhook is for
     provider        ExternalProvider
     providerEventId String? // provider event id header to dedupe if available
     payload         Json
@@ -526,6 +814,8 @@ model WebhookEvent {
     updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
 
     @@index([provider, providerEventId], name: "idx_webhook_provider_event")
+    @@index([organizationId, processed])
+    @@index([integrationId])
 }
 
 enum IngestionStatus {
@@ -574,13 +864,410 @@ model Job {
     updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
 }
 
-/// Audit logs
-model AuditLog {
-    id             String   @id @default(uuid())
-    userId         String?
+/// Chat Conversation Models - Dynamic chat system (Org/Project/Direct/Task Team/RAG)
+/// Supports: ORG (organization-level), PROJECT (project-level), DIRECT (1-on-1), TASK_TEAM (task team), RAG_CHAT (project RAG chatbot)
+/// VALIDATION RULES (enforce in application):
+/// - type=ORG: organizationId IS NOT NULL, projectId IS NULL, taskId IS NULL
+/// - type=PROJECT/RAG_CHAT: projectId IS NOT NULL, organizationId IS NULL, taskId IS NULL
+/// - type=DIRECT: exactly 2 participants, projectId IS NULL, organizationId IS NULL, taskId IS NULL
+/// - type=TASK_TEAM: taskId IS NOT NULL, projectId IS NULL, organizationId IS NULL (project derived from task)
+model Conversation {
+    id   String           @id @default(uuid())
+    type ConversationType @default(RAG_CHAT)
+
+    // Project-scoped conversations (PROJECT, RAG_CHAT, TASK_TEAM)
+    project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    projectId String?
+
+    // Organization-scoped conversations (ORG)
+    organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
     organizationId String?
-    action         String
-    meta           Json?
-    createdAt      DateTime @default(now()) @map("created_at")
-    updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+    // Task team conversation (TASK_TEAM) - one conversation per task team
+    task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+    taskId String? @unique
+
+    // Direct/1-on-1 conversations (DIRECT) - between two users (validation: exactly 2 participants required)
+    participants ConversationParticipant[]
+
+    title         String? // Auto-generated or user-provided
+    createdBy     String // User who created the conversation
+    createdByUser User          @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+    messages      ChatMessage[]
+    createdAt     DateTime      @default(now()) @map("created_at")
+    updatedAt     DateTime      @default(now()) @updatedAt @map("updated_at")
+
+    @@index([projectId, type])
+    @@index([organizationId, type])
+    @@index([type, taskId]) // For TASK_TEAM type queries
+    @@index([updatedAt]) // For recent conversations
+}
+
+/// Conversation participants (for DIRECT and TASK_TEAM conversations, and org/project chats)
+/// VALIDATION: For type=DIRECT conversations, exactly 2 participants required
+model ConversationParticipant {
+    id             String              @id @default(uuid())
+    conversation   Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+    userId         String
+    member         OrganizationMember? @relation(fields: [memberId], references: [id], onDelete: SetNull)
+    memberId       String?
+    joinedAt       DateTime            @default(now())
+    leftAt         DateTime?
+    lastReadAt     DateTime? // Last message read timestamp
+
+    @@unique([conversationId, userId])
+    @@index([conversationId])
+    @@index([userId])
+    @@index([conversationId, leftAt]) // For counting active participants
+}
+
+model ChatMessage {
+    id             String              @id @default(uuid())
+    conversation   Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    conversationId String
+    role           ChatRole            @default(USER) // USER, ASSISTANT, SYSTEM
+    content        String
+    senderId       String? // User who sent the message (if USER role)
+    sender         User?               @relation(fields: [senderId], references: [id], onDelete: SetNull)
+    senderMemberId String? // OrganizationMember who sent (for org context)
+    senderMember   OrganizationMember? @relation(fields: [senderMemberId], references: [id], onDelete: SetNull)
+    mentions       ChatMention[] // Users mentioned in this message
+    sources        ChatMessageSource[] // References to RawEvents/LlmOutputs used (for RAG)
+    metadata       Json? // Tokens used, model, etc.
+    createdAt      DateTime            @default(now()) @map("created_at")
+
+    @@index([conversationId, createdAt])
+    @@index([senderId])
+    @@index([senderMemberId])
+}
+
+/// Mentions in chat messages (e.g., @username)
+model ChatMention {
+    id                String              @id @default(uuid())
+    message           ChatMessage         @relation(fields: [messageId], references: [id], onDelete: Cascade)
+    messageId         String
+    mentionedUser     User                @relation(fields: [mentionedUserId], references: [id], onDelete: Cascade)
+    mentionedUserId   String
+    mentionedMember   OrganizationMember? @relation(fields: [mentionedMemberId], references: [id], onDelete: SetNull)
+    mentionedMemberId String?
+    position          Int? // Character position in message content where mention occurs
+    createdAt         DateTime            @default(now())
+
+    @@index([messageId])
+    @@index([mentionedUserId])
+    @@index([mentionedMemberId])
+}
+
+model ChatMessageSource {
+    id             String      @id @default(uuid())
+    chatMessage    ChatMessage @relation(fields: [chatMessageId], references: [id], onDelete: Cascade)
+    chatMessageId  String
+    rawEventId     String?
+    rawEvent       RawEvent?   @relation(fields: [rawEventId], references: [id], onDelete: SetNull)
+    llmOutputId    String?
+    llmOutput      LlmOutput?  @relation(fields: [llmOutputId], references: [id], onDelete: SetNull)
+    relevanceScore Float? // How relevant this source was
+    createdAt      DateTime    @default(now())
+
+    @@index([chatMessageId])
+    @@index([rawEventId])
+    @@index([llmOutputId])
+}
+
+/// Feature Tracking Models
+model Feature {
+    id                     String              @id @default(uuid())
+    project                Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    projectId              String
+    name                   String // e.g., "Authentication", "Payment Gateway"
+    description            String?
+    status                 FeatureStatus       @default(DISCOVERED)
+    autoDetected           Boolean             @default(true) // true if auto-detected, false if manual
+    detectedById           String? // User who manually created or confirmed
+    detectedBy             User?               @relation(fields: [detectedById], references: [id], onDelete: SetNull)
+    autoDetectedByMemberId String? // OrganizationMember whose work triggered auto-detection (from first FeatureEvent.rawEvent.authorMemberId)
+    autoDetectedByMember   OrganizationMember? @relation("FeatureAutoDetectedBy", fields: [autoDetectedByMemberId], references: [id], onDelete: SetNull)
+    events                 FeatureEvent[] // Related RawEvents
+    completionDate         DateTime? // When marked as completed
+    completedByMemberId    String? // OrganizationMember who completed the feature (for contribution tracking)
+    completedByMember      OrganizationMember? @relation(fields: [completedByMemberId], references: [id], onDelete: SetNull)
+    createdAt              DateTime            @default(now()) @map("created_at")
+    updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+
+    @@unique([projectId, name])
+    @@index([projectId, status])
+    @@index([autoDetectedByMemberId]) // For contribution tracking queries
+    @@index([completedByMemberId]) // For contribution tracking queries
+}
+
+model FeatureEvent {
+    id         String   @id @default(uuid())
+    feature    Feature  @relation(fields: [featureId], references: [id], onDelete: Cascade)
+    featureId  String
+    rawEvent   RawEvent @relation(fields: [rawEventId], references: [id], onDelete: Cascade)
+    rawEventId String
+    relevance  Float    @default(1.0) // How relevant this event is to the feature
+    createdAt  DateTime @default(now())
+
+    @@unique([featureId, rawEventId])
+    @@index([featureId])
+    @@index([rawEventId])
+}
+
+/// Semantic Understanding Reports (what users are saying about the project, not emotional sentiment)
+model SentimentReport {
+    id           String           @id @default(uuid())
+    project      Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    projectId    String
+    periodStart  DateTime // Start of reporting period
+    periodEnd    DateTime // End of reporting period
+    periodType   SentimentPeriod  @default(DAILY)
+    source       ExternalProvider // GITHUB, SLACK, DISCORD, etc.
+    channelId    String? // For Slack/Discord channels
+    repoId       String? // For GitHub repos
+    messageCount Int              @default(0)
+
+    // Semantic understanding breakdown (what users are communicating about)
+    fixIssueCount        Int @default(0) // Messages about fixing issues
+    featureProgressCount Int @default(0) // Messages about feature work
+    featureCompleteCount Int @default(0) // Messages indicating features done
+    blockerCount         Int @default(0) // Messages about blockers
+    questionCount        Int @default(0) // Questions asked
+    decisionCount        Int @default(0) // Decisions made
+    updateCount          Int @default(0) // Updates provided
+    otherCount           Int @default(0) // Other semantic intents
+
+    // LLM-generated insights about what the team is discussing
+    keyTopics       Json? // Array of key topics/issues discussed
+    trendingIssues  Json? // Issues/features that are trending in discussions
+    insights        String? // LLM-generated semantic insights (e.g., "Team focused on authentication fixes this week")
+    trends          Json? // Time series data for semantic intents
+    projectReport   ProjectReport? @relation(fields: [projectReportId], references: [id], onDelete: SetNull)
+    projectReportId String? // Link to project report if applicable
+    createdAt       DateTime       @default(now()) @map("created_at")
+
+    @@unique([projectId, periodStart, periodEnd, periodType, source])
+    @@index([projectId, periodEnd])
+    @@index([projectReportId])
+}
+
+/// Content Chunk Model for Better Embedding
+model ContentChunk {
+    id          String      @id @default(uuid())
+    rawEvent    RawEvent    @relation(fields: [rawEventId], references: [id], onDelete: Cascade)
+    rawEventId  String
+    llmOutput   LlmOutput?  @relation(fields: [llmOutputId], references: [id], onDelete: SetNull)
+    llmOutputId String?
+    chunkIndex  Int // Order of chunk within parent
+    content     String // The actual chunk content
+    startOffset Int? // Character offset in original content
+    endOffset   Int? // Character offset in original content
+    embeddings  Embedding[]
+    metadata    Json? // Additional chunk metadata
+    createdAt   DateTime    @default(now()) @map("created_at")
+
+    @@index([rawEventId, chunkIndex])
+    @@index([llmOutputId])
+}
+
+/// Project Report Model - Tracks "what's being done" in the project
+/// Contains LLM-generated summaries of progress, features, tasks, and overall project status
+model ProjectReport {
+    id               String            @id @default(uuid())
+    project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    projectId        String
+    reportType       ReportType        @default(DAILY)
+    periodStart      DateTime // Start of reporting period
+    periodEnd        DateTime // End of reporting period
+    summary          String // LLM-generated summary of what's being done (e.g., "Auth feature 80% complete, 3 PRs merged")
+    highlights       Json? // Key highlights: completed features, merged PRs, resolved issues, etc.
+    metrics          Json? // Velocity metrics: commits count, PRs opened/closed, issues resolved, tasks completed, etc.
+    featuresStatus   Json? // Feature completion status summary
+    tasksStatus      Json? // Task completion status (total, completed, in-progress, overdue)
+    sentimentReports SentimentReport[] // Link to semantic understanding reports (one per source)
+    llmOutput        LlmOutput?        @relation(fields: [llmOutputId], references: [id], onDelete: SetNull)
+    llmOutputId      String?           @unique
+    generatedById    String? // User who triggered (or null for auto-generated)
+    generatedBy      User?             @relation(fields: [generatedById], references: [id], onDelete: SetNull)
+    createdAt        DateTime          @default(now()) @map("created_at")
+
+    @@unique([projectId, reportType, periodStart, periodEnd])
+    @@index([projectId, periodEnd])
+}
+
+/// Credit Transaction Model - Tracks all credit movements (purchases, usage, refunds)
+/// VALIDATION RULES (enforce in application):
+/// - type=PURCHASE/SUBSCRIPTION/BONUS/ADJUSTMENT: amount > 0
+/// - type=USAGE: amount < 0
+/// - type=REFUND: amount > 0 (refunds add credits back)
+/// - type=EXPIRY: amount < 0 (expired credits are removed)
+/// - balanceAfter = balanceBefore + amount
+/// - Update Organization.creditBalance atomically with transaction (use database transactions)
+model CreditTransaction {
+    id                String                  @id @default(uuid())
+    organization      Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId    String
+    type              CreditTransactionType // PURCHASE, USAGE, REFUND, BONUS, ADJUSTMENT, SUBSCRIPTION, EXPIRY
+    status            CreditTransactionStatus @default(PENDING) // PENDING, COMPLETED, FAILED, REFUNDED, CANCELLED
+    amount            Decimal                 @db.Decimal(15, 2) // Positive for credits added, negative for credits spent
+    balanceBefore     Decimal                 @db.Decimal(15, 2) // Credit balance before this transaction
+    balanceAfter      Decimal                 @db.Decimal(15, 2) // Credit balance after this transaction
+    description       String? // Human-readable description
+    referenceId       String? // Reference to payment, LlmUsage, or admin action
+    referenceType     String? // "payment", "llm_usage", "admin", "subscription"
+    metadata          Json? // Additional transaction metadata
+    processedAt       DateTime? // When transaction was processed
+    processedById     String? // User ID who processed it (null if processed by system)
+    processedByUser   User?                   @relation(fields: [processedById], references: [id], onDelete: SetNull)
+    refundedPaymentId String? // If this is a refund transaction, reference to original Payment
+    refundedPayment   Payment?                @relation("RefundTransaction", fields: [refundedPaymentId], references: [id], onDelete: SetNull)
+    createdAt         DateTime                @default(now()) @map("created_at")
+    updatedAt         DateTime                @default(now()) @updatedAt @map("updated_at")
+
+    // Relations
+    payment    Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+    paymentId  String? // If this transaction is from a payment
+    llmUsage   LlmUsage? @relation(fields: [llmUsageId], references: [id], onDelete: SetNull)
+    llmUsageId String?   @unique // Reference to LlmUsage that triggered this transaction (one-to-one)
+
+    @@index([organizationId, createdAt], name: "idx_credit_txn_org_created")
+    @@index([organizationId, type, status], name: "idx_credit_txn_org_type_status")
+    @@index([status], name: "idx_credit_txn_status")
+    @@index([referenceId, referenceType], name: "idx_credit_txn_ref")
+    @@index([refundedPaymentId])
+    @@index([processedById])
+}
+
+/// Stripe Customer Model - Links Organization to Stripe customer
+model StripeCustomer {
+    id               String       @id @default(uuid())
+    organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId   String       @unique
+    stripeCustomerId String       @unique // Stripe customer ID (cus_xxxxx)
+    email            String? // Customer email from Stripe
+    name             String? // Customer name from Stripe
+    metadata         Json? // Additional Stripe customer metadata
+    createdAt        DateTime     @default(now()) @map("created_at")
+    updatedAt        DateTime     @default(now()) @updatedAt @map("updated_at")
+
+    // Relations
+    payments      Payment[] // All payments for this customer
+    subscriptions Subscription[] // All subscriptions for this customer
+
+    @@index([stripeCustomerId])
+}
+
+/// Payment Model - Stripe payment records
+model Payment {
+    id               String          @id @default(uuid())
+    organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId   String
+    stripeCustomer   StripeCustomer? @relation(fields: [stripeCustomerId], references: [id], onDelete: SetNull)
+    stripeCustomerId String?
+    stripePaymentId  String?         @unique // Stripe payment intent ID (pi_xxxxx)
+    stripeChargeId   String?         @unique // Stripe charge ID (ch_xxxxx)
+    amount           Decimal         @db.Decimal(10, 2) // Amount in currency (e.g., USD)
+    currency         String          @default("usd") // Currency code (usd, eur, etc.)
+    creditsAmount    Decimal         @db.Decimal(15, 2) // Credits purchased
+    status           PaymentStatus   @default(PENDING)
+    description      String? // Payment description
+    metadata         Json? // Stripe payment metadata
+    failureReason    String? // If payment failed, reason
+    refundedAt       DateTime? // When payment was refunded
+    refundAmount     Decimal?        @db.Decimal(10, 2) // Amount refunded
+    processedAt      DateTime? // When payment was processed
+    createdAt        DateTime        @default(now()) @map("created_at")
+    updatedAt        DateTime        @default(now()) @updatedAt @map("updated_at")
+
+    // Relations
+    creditTransactions CreditTransaction[] // Credit transactions from this payment
+    refundTransactions CreditTransaction[] @relation("RefundTransaction") // Refund transactions for this payment
+
+    @@index([organizationId, createdAt])
+    @@index([organizationId, status])
+    @@index([stripePaymentId])
+    @@index([stripeChargeId])
+    @@index([status])
+}
+
+/// Subscription Model - Stripe subscription records
+/// VALIDATION: Prevent duplicate credit grants per billing period by tracking lastCreditsGrantedPeriod
+model Subscription {
+    id                       String             @id @default(uuid())
+    organization             Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId           String
+    stripeCustomer           StripeCustomer?    @relation(fields: [stripeCustomerId], references: [id], onDelete: SetNull)
+    stripeCustomerId         String?
+    stripeSubscriptionId     String             @unique // Stripe subscription ID (sub_xxxxx)
+    stripePriceId            String? // Stripe price ID (price_xxxxx)
+    planName                 String // Subscription plan name (e.g., "pro", "enterprise")
+    status                   SubscriptionStatus @default(TRIALING)
+    currentPeriodStart       DateTime // Current billing period start
+    currentPeriodEnd         DateTime // Current billing period end
+    cancelAtPeriodEnd        Boolean            @default(false) // Cancel at end of period
+    canceledAt               DateTime? // When subscription was canceled
+    trialStart               DateTime? // Trial period start
+    trialEnd                 DateTime? // Trial period end
+    monthlyCredits           Decimal?           @db.Decimal(15, 2) // Monthly credit allowance
+    lastCreditsGrantedPeriod DateTime? // Last billing period start when credits were granted (prevents duplicate grants)
+    creditsGranted           Boolean            @default(false) // DEPRECATED: Use lastCreditsGrantedPeriod instead - Whether credits have been granted for current period
+    metadata                 Json? // Stripe subscription metadata
+    createdAt                DateTime           @default(now()) @map("created_at")
+    updatedAt                DateTime           @default(now()) @updatedAt @map("updated_at")
+
+    @@index([organizationId, status])
+    @@index([stripeSubscriptionId])
+    @@index([status])
+    @@index([currentPeriodEnd])
+}
+
+/// LLM Usage Model - Tracks credit consumption per LLM operation
+model LlmUsage {
+    id              String           @id @default(uuid())
+    organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    organizationId  String
+    operationType   LlmOperationType // Type of LLM operation
+    creditsConsumed Decimal          @db.Decimal(15, 4) // Credits consumed (high precision for small operations)
+    inputTokens     Int? // Input tokens used
+    outputTokens    Int? // Output tokens generated
+    totalTokens     Int? // Total tokens (input + output)
+    model           String? // LLM model used (e.g., "gpt-4", "gpt-3.5-turbo")
+    costPerCredit   Decimal?         @db.Decimal(10, 6) // Cost per credit for this operation
+    status          LlmUsageStatus   @default(PENDING) // PENDING, COMPLETED, FAILED, CANCELLED
+    errorMessage    String? // If operation failed, error message
+    referenceId     String? // Reference to related entity (rawEventId, llmOutputId, conversationId)
+    referenceType   String? // "raw_event", "llm_output", "conversation", "feature_detection"
+    metadata        Json? // Additional usage metadata
+    createdAt       DateTime         @default(now()) @map("created_at")
+
+    // Relations
+    creditTransaction CreditTransaction? // Back-reference from CreditTransaction (CreditTransaction.llmUsageId references this)
+
+    @@index([organizationId, createdAt])
+    @@index([organizationId, operationType])
+    @@index([operationType, createdAt])
+    @@index([status])
+    @@index([referenceId, referenceType])
+}
+
+/// Audit logs - Tracks all important actions in the system
+model AuditLog {
+    id             String        @id @default(uuid())
+    user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+    userId         String? // User who performed the action (null for system actions)
+    organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+    organizationId String? // Organization context for the action
+    action         String // Action performed (e.g., "CREATE_PROJECT", "UPDATE_CREDITS", "DELETE_TASK")
+    meta           Json? // Additional metadata about the action
+    ipAddress      String? // IP address of the user (for security auditing)
+    userAgent      String? // User agent string
+    createdAt      DateTime      @default(now()) @map("created_at")
+    updatedAt      DateTime      @default(now()) @updatedAt @map("updated_at")
+
+    @@index([userId, createdAt])
+    @@index([organizationId, createdAt])
+    @@index([action, createdAt])
+    @@index([createdAt])
 }

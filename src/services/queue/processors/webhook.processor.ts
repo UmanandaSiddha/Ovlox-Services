@@ -1,8 +1,7 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { WEBHOOK_QUEUE } from 'src/config/constants';
 import { WebhookJobPayload } from '../webhook.queue';
-import { Injectable, Logger } from '@nestjs/common';
-import { LLMQueue } from '../llm.queue';
+import { Injectable } from '@nestjs/common';
 import { DatabaseService } from 'src/services/database/database.service';
 import { LoggerService } from 'src/services/logger/logger.service';
 import { ExternalProvider } from 'generated/prisma/enums';
@@ -14,7 +13,6 @@ export class WebhookProcessor extends WorkerHost {
 
     constructor(
         private databaseService: DatabaseService,
-        private llmQueue: LLMQueue,
     ) {
         super();
     }
@@ -24,38 +22,27 @@ export class WebhookProcessor extends WorkerHost {
 
         this.logger.log(`Processing ${data.provider} webhook event`, WebhookProcessor.name);
 
-        /**
-         * TODO: Validate signatures
-         * TODO: Parse payload correctly for each provider
-         */
-        const parsedEvent = {
-            projectId: 'todo', // determine project mapping based on integration connection
-            integrationId: 'todo',
-            content: JSON.stringify(data.payload),
-            source: data.provider.toUpperCase() as ExternalProvider,
-            sourceId: Date.now().toString(),
-        };
+        try {
+            // Store webhook event for logging
+            // Note: Provider-specific webhook handlers are called directly from controllers
+            // This processor is a fallback for queued webhook events
+            await this.databaseService.webhookEvent.create({
+                data: {
+                    provider: data.provider,
+                    providerEventId: data.headers?.['x-github-event'] || data.payload?.id || Date.now().toString(),
+                    payload: data.payload,
+                },
+            });
 
-        const rawEvent = await this.databaseService.rawEvent.create({
-            data: {
-                projectId: parsedEvent.projectId,
-                integrationId: parsedEvent.integrationId,
-                content: parsedEvent.content,
-                source: parsedEvent.source,
-                sourceId: parsedEvent.sourceId,
-                eventType: 'OTHER',
-                timestamp: new Date(),
-            },
-        });
-
-        // Send to LLM queue
-        await this.llmQueue.enqueue({
-            rawEventId: rawEvent.id,
-            mode: 'summary',
-        });
-
-        return true;
+            // For now, webhook processing is handled directly in controllers
+            // This processor logs the event for auditing
+            return true;
+        } catch (error) {
+            this.logger.error(`Webhook processing failed for ${data.provider}: ${error.message}`, WebhookProcessor.name);
+            throw error;
+        }
     }
+
     @OnWorkerEvent('failed')
     onFailed(job, error) {
         this.logger.error(`Webhook job failed: ${job.id} - ${error}`, WebhookProcessor.name);

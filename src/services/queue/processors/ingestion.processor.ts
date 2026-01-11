@@ -2,7 +2,6 @@ import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { INJESTION_QUEUE } from 'src/config/constants';
 import { IngestionJobPayload } from '../ingestion.queue';
 import { Injectable } from '@nestjs/common';
-import { LLMQueue } from '../llm.queue';
 import { DatabaseService } from 'src/services/database/database.service';
 import { LoggerService } from 'src/services/logger/logger.service';
 
@@ -13,7 +12,6 @@ export class IngestionProcessor extends WorkerHost {
 
     constructor(
         private databaseService: DatabaseService,
-        private llmQueue: LLMQueue,
     ) {
         super();
     }
@@ -23,42 +21,12 @@ export class IngestionProcessor extends WorkerHost {
 
         this.logger.log(`Starting ingestion for ${data.type} on resource ${data.resourceId}`, IngestionProcessor.name);
 
-        /**
-         * TODO: Implement provider-specific ingestion logic.
-         * Example:
-         * - For GitHub: fetch commits using Octokit + installation token
-         * - For Slack/Discord: fetch channel messages via pagination
-         * - For Notion/Jira: list tasks and activity
-         */
-
-        // Example pseudo ingestion:
-        const events = [
-            {
-                content: 'Example imported commit/message/event',
-                timestamp: new Date(),
-            },
-        ];
-
-        // Save RawEvents in DB
-        for (const e of events) {
-            const rawEvent = await this.databaseService.rawEvent.create({
-                data: {
-                    projectId: data.projectId,
-                    integrationId: data.integrationId,
-                    eventType: 'OTHER',
-                    source: 'GITHUB',
-                    sourceId: 'placeholder',
-                    timestamp: e.timestamp,
-                    content: e.content,
-                },
-            });
-
-            await this.llmQueue.enqueue({
-                rawEventId: rawEvent.id,
-                mode: 'summary',
-            });
-        }
-
+        // Note: Ingestion is handled directly via provider service endpoints
+        // This processor can be used for async ingestion jobs if needed
+        // For now, ingestion endpoints call provider services directly
+        
+        this.logger.warn(`IngestionProcessor: Direct ingestion endpoints should be used instead of queue`, IngestionProcessor.name);
+        
         return true;
     }
 

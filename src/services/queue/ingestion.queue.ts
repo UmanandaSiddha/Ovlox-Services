@@ -7,7 +7,14 @@ export interface IngestionJobPayload {
     integrationId: string;
     projectId: string;
     resourceId: string;
-    type: 'github_history' | 'slack_history' | 'discord_history' | 'notion_history' | 'jira_history';
+    type: 'github_history' | 'slack_history' | 'discord_history' | 'notion_history' | 'jira_history' | 'figma_history';
+    options?: {
+        jql?: string; // For Jira
+        databaseId?: string; // For Notion
+        fileKey?: string; // For Figma
+        teamId?: string; // For Figma
+        guildId?: string; // For Discord
+    };
 }
 
 @Injectable()

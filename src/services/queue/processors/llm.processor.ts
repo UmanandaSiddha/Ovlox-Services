@@ -4,6 +4,7 @@ import { LLMJobPayload } from '../llm.queue';
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from 'src/services/database/database.service';
 import { LoggerService } from 'src/services/logger/logger.service';
+import { LlmService } from 'src/modules/llm/llm.service';
 
 @Injectable()
 @Processor(LLM_QUEUE)
@@ -11,7 +12,8 @@ export class LLMProcessor extends WorkerHost {
     private readonly logger = new LoggerService(LLMProcessor.name);
 
     constructor(
-        private databaseService: DatabaseService,
+        private readonly databaseService: DatabaseService,
+        private readonly llmService: LlmService,
     ) {
         super();
     }
@@ -21,62 +23,100 @@ export class LLMProcessor extends WorkerHost {
 
         this.logger.log(`Processing LLM task mode=${data.mode}`, LLMProcessor.name);
 
-        if (data.mode === 'summary') {
-            return this.processSummary(data.rawEventId);
-        }
+        try {
+            if (data.mode === 'summary') {
+                return await this.processSummary(data.rawEventId);
+            }
 
-        if (data.mode === 'chat') {
-            return this.processChat(data.projectId!, data.question!);
-        }
+            if (data.mode === 'chat') {
+                if (!data.conversationId || !data.question || !data.userId) {
+                    throw new Error('Chat mode requires conversationId, question, and userId');
+                }
+                
+                return await this.processChat(data.conversationId, data.question, data.projectId, data.userId);
+            }
 
-        return true;
+            if (data.mode === 'project_report') {
+                return await this.processProjectReport(data.projectId!);
+            }
+
+            this.logger.warn(`Unknown LLM mode: ${data.mode}`, LLMProcessor.name);
+            return true;
+        } catch (error) {
+            this.logger.error(`LLM job processing failed: ${job.id} - ${error.message}`, LLMProcessor.name);
+            throw error;
+        }
     }
 
     private async processSummary(rawEventId: string) {
-        const event = await this.databaseService.rawEvent.findUnique({ where: { id: rawEventId } });
-        if (!event) return;
+        // Use LlmService to process the RawEvent
+        const llmOutput = await this.llmService.processRawEvent(rawEventId);
+        return llmOutput;
+    }
 
-        const summary = `AI summary: ${event.content?.slice(0, 200)}`;
-
-        const llm = await this.databaseService.llmOutput.create({
-            data: {
-                projectId: event.projectId,
-                rawEventId,
-                type: 'summary',
-                content: summary,
-                model: 'openai-stub',
+    private async processChat(conversationId: string, question: string, projectId: string | undefined, userId: string) {
+        // Get conversation to determine project/org
+        const conversation = await this.databaseService.conversation.findUnique({
+            where: { id: conversationId },
+            include: {
+                project: {
+                    include: { organization: true },
+                },
+                organization: true,
             },
         });
 
-        await this.databaseService.rawEvent.update({
-            where: { id: event.id },
-            data: { processedByLLM: true },
+        if (!conversation) {
+            throw new Error(`Conversation ${conversationId} not found`);
+        }
+
+        const actualProjectId = conversation.projectId || projectId;
+        const organizationId = conversation.project?.organizationId || conversation.organizationId;
+
+        if (!organizationId) {
+            throw new Error('Conversation must be associated with a project or organization');
+        }
+
+        // Use LlmService chat method
+        const result = await this.llmService.chat({
+            conversationId,
+            question,
+            userId,
+            projectId: actualProjectId,
+            organizationId,
         });
 
-        return llm;
+        return result;
     }
 
-    private async processChat(projectId: string, question: string) {
-        const context = await this.databaseService.llmOutput.findMany({
-            where: { projectId },
-            orderBy: { createdAt: 'desc' },
-            take: 5,
+    private async processProjectReport(projectId: string) {
+        // Get project
+        const project = await this.databaseService.project.findUnique({
+            where: { id: projectId },
         });
 
-        const answer = `AI answer to "${question}" based on ${context.length} context items.`;
+        if (!project) {
+            throw new Error(`Project ${projectId} not found`);
+        }
 
-        return this.databaseService.llmOutput.create({
-            data: {
-                projectId,
-                type: 'answer',
-                content: answer,
-                model: 'openai-stub',
-            },
+        // Generate report for the last 24 hours (can be customized)
+        const periodEnd = new Date();
+        const periodStart = new Date(periodEnd);
+        periodStart.setHours(periodStart.getHours() - 24);
+
+        const report = await this.llmService.generateProjectReport({
+            projectId,
+            periodStart,
+            periodEnd,
+            reportType: 'DAILY',
         });
+
+        return report;
     }
+
 
     @OnWorkerEvent('failed')
     onFailed(job, err) {
-        this.logger.error(`LLM job failed: ${job.id} - ${err}`, LLMProcessor.name);
+        this.logger.error(`LLM job failed: ${job.id} - ${err.message}`, LLMProcessor.name);
     }
 }

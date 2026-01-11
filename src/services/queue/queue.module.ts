@@ -12,6 +12,7 @@ import { LLMProcessor } from './processors/llm.processor';
 import { EmailProcessor } from './processors/email.processor';
 import { LoggerModule } from '../logger/logger.module';
 import { DatabaseModule } from '../database/database.module';
+import { LlmModule } from '../../modules/llm/llm.module';
 import { ConnectionOptions } from 'bullmq';
 
 @Global()
@@ -19,6 +20,7 @@ import { ConnectionOptions } from 'bullmq';
     imports: [
         LoggerModule,
         DatabaseModule,
+        LlmModule,
         BullModule.forRootAsync({
             imports: [ConfigModule],
             inject: [ConfigService],

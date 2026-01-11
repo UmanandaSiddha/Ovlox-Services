@@ -4,13 +4,14 @@ services:
         image: ankane/pgvector:latest
         container_name: ovlox-postgres
         environment:
-            POSTGRES_USER: ovlox
-            POSTGRES_PASSWORD: ovlox
+            POSTGRES_USER: postgres
+            POSTGRES_PASSWORD: password
             POSTGRES_DB: ovlox
         ports:
-            - "5432:5432"
+            - "5433:5432"
         volumes:
             - pgdata:/var/lib/postgresql/data
+        restart: unless-stopped  # Auto-start container if it stops unexpectedly
 
 volumes:
     pgdata:

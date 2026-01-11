@@ -4,10 +4,12 @@ import { Queue } from 'bullmq';
 import { LLM_QUEUE } from 'src/config/constants';
 
 export interface LLMJobPayload {
-    rawEventId: string;
+    rawEventId?: string;
     mode: 'summary' | 'embedding' | 'chat' | 'project_report';
     question?: string;
     projectId?: string;
+    conversationId?: string;
+    userId?: string;
 }
 
 @Injectable()

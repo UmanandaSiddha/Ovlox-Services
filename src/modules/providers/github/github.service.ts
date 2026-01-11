@@ -7,14 +7,15 @@ import { decrypt, encrypt } from 'src/utils/encryption';
 import { signState } from 'src/utils/oauth-state';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
-import { analyzeCodeQuality, analyzeSecurityRisk, generateDebugFix, summarizeCodeChange } from 'src/utils/llm.helper';
+import { LlmService } from 'src/modules/llm/llm.service';
 import { DebugFixResponse, SecurityRisk } from 'src/utils/types';
 
 @Injectable()
 export class GithubService {
     constructor(
         private readonly databaseService: DatabaseService,
-        private readonly configService: ConfigService
+        private readonly configService: ConfigService,
+        private readonly llmService: LlmService
     ) { }
 
     async getOAuthUrl(orgId: string) {
@@ -207,6 +208,52 @@ export class GithubService {
         return results;
     }
 
+    async syncRepositories(integrationId: string) {
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
+        });
+
+        if (!integration) {
+            throw new NotFoundException(`Integration ${integrationId} not found`);
+        }
+
+        const repos = await this.fetchInstallationRepos(integrationId);
+
+        // Sync repos to IntegrationResource
+        for (const repo of repos) {
+            await this.databaseService.integrationResource.upsert({
+                where: {
+                    uq_integration_resource_provider: {
+                        integrationId: integration.id,
+                        provider: ExternalProvider.GITHUB,
+                        providerId: String(repo.id),
+                    },
+                },
+                update: {
+                    name: repo.name,
+                    url: repo.url,
+                    metadata: {
+                        updated_at: repo.updated_at,
+                        pushed_at: repo.pushed_at,
+                    },
+                },
+                create: {
+                    integrationId: integration.id,
+                    provider: ExternalProvider.GITHUB,
+                    providerId: String(repo.id),
+                    name: repo.name,
+                    url: repo.url,
+                    metadata: {
+                        updated_at: repo.updated_at,
+                        pushed_at: repo.pushed_at,
+                    },
+                },
+            });
+        }
+
+        return { synced: repos.length, repositories: repos };
+    }
+
     async getValidInstallationToken(integrationId: string) {
         const integration = await this.databaseService.integration.findUnique({
             where: { id: integrationId },
@@ -390,74 +437,365 @@ export class GithubService {
         // }
     }
 
+    /**
+     * Helper method to resolve identity and map to OrganizationMember
+     */
+    private async resolveAuthorIdentity(
+        organizationId: string,
+        providerUserId: string,
+        authorName?: string,
+        authorEmail?: string
+    ): Promise<{ identityId: string | null; memberId: string | null }> {
+        try {
+            // Find or create Identity
+            let identity = await this.databaseService.identity.findFirst({
+                where: {
+                    organizationId,
+                    provider: ExternalProvider.GITHUB,
+                    providerUserId: String(providerUserId),
+                },
+            });
+
+            if (!identity) {
+                identity = await this.databaseService.identity.create({
+                    data: {
+                        organizationId,
+                        provider: ExternalProvider.GITHUB,
+                        providerUserId: String(providerUserId),
+                        displayName: authorName || undefined,
+                        rawProfile: { email: authorEmail || undefined },
+                    },
+                });
+            }
+
+            // Find ContributorMap to get OrganizationMember
+            const contributorMap = await this.databaseService.contributorMap.findUnique({
+                where: {
+                    uq_contributor_map_org_identity: {
+                        organizationId,
+                        identityId: identity.id,
+                    },
+                },
+                include: { member: true },
+            });
+
+            return {
+                identityId: identity.id,
+                memberId: contributorMap?.memberId || null,
+            };
+        } catch (error) {
+            // If identity resolution fails, return null - event will still be created
+            return { identityId: null, memberId: null };
+        }
+    }
+
     async commit(payload: any) {
         const commit = payload.head_commit;
         if (!commit) return;
 
-        console.log(commit);
+        // Find integration by repository URL or installation ID
+        const repoFullName = payload.repository?.full_name;
+        const installationId = payload.installation?.id;
 
-        // const raw = await this.databaseService.rawEvent.create({
-        //     data: {
-        //         projectId: null,
-        //         integrationId: null,
-        //         source: ExternalProvider.GITHUB,
-        //         sourceId: payload.after,
-        //         eventType: RawEventType.COMMIT,
-        //         authorName: commit.author?.name,
-        //         authorEmail: commit.author?.email,
-        //         timestamp: new Date(commit.timestamp),
-        //         content: commit.message,
-        //         metadata: payload,
-        //     },
-        // });
+        if (!repoFullName && !installationId) {
+            console.warn('GitHub commit webhook: missing repository and installation info');
+            return;
+        }
 
-        // LATER
-        // await this.llm.processRawEvent(raw.id);
+        // Find integration
+        const integration = await this.databaseService.integration.findFirst({
+            where: {
+                type: ExternalProvider.GITHUB,
+                ...(installationId ? { externalAccountId: String(installationId) } : {}),
+            },
+            include: { organization: true },
+        });
+
+        if (!integration) {
+            console.warn(`GitHub commit webhook: Integration not found for installation ${installationId}`);
+            return;
+        }
+
+        // Find IntegrationResource for this repo
+        const resource = repoFullName
+            ? await this.databaseService.integrationResource.findFirst({
+                  where: {
+                      integrationId: integration.id,
+                      provider: ExternalProvider.GITHUB,
+                      providerId: String(payload.repository.id),
+                  },
+              })
+            : null;
+
+        // Find projects connected to this integration that include this repo
+        const connections = await this.databaseService.integrationConnection.findMany({
+            where: {
+                integrationId: integration.id,
+                ...(repoFullName && resource
+                    ? {
+                          items: {
+                              path: ['repos'],
+                              array_contains: repoFullName,
+                          },
+                      }
+                    : {}),
+            },
+            include: { project: true },
+        });
+
+        // Resolve author identity
+        const authorId = commit.author?.id || commit.author?.username;
+        const { identityId, memberId } = authorId
+            ? await this.resolveAuthorIdentity(integration.organizationId, authorId, commit.author?.name, commit.author?.email)
+            : { identityId: null, memberId: null };
+
+        // Create RawEvent for each connected project (or one if no connections)
+        const projectsToProcess = connections.length > 0 ? connections.map((c) => c.project) : [null];
+
+        for (const project of projectsToProcess) {
+            const rawEvent = await this.databaseService.rawEvent.create({
+                data: {
+                    integrationId: integration.id,
+                    projectId: project?.id || null,
+                    resourceId: resource?.providerId || String(payload.repository.id),
+                    source: ExternalProvider.GITHUB,
+                    sourceId: payload.after || commit.id,
+                    eventType: RawEventType.COMMIT,
+                    authorIdentityId: identityId,
+                    authorMemberId: memberId,
+                    authorName: commit.author?.name,
+                    authorEmail: commit.author?.email,
+                    timestamp: new Date(commit.timestamp || Date.now()),
+                    content: commit.message,
+                    metadata: {
+                        repository: payload.repository,
+                        commits: payload.commits,
+                        pusher: payload.pusher,
+                        ref: payload.ref,
+                        filesChanged: commit.added?.length + commit.modified?.length + commit.removed?.length || 0,
+                    },
+                },
+            });
+
+            // Queue LLM processing if project exists
+            if (project) {
+                try {
+                    await this.llmService.processRawEvent(rawEvent.id);
+                } catch (error) {
+                    console.error(`Failed to process RawEvent ${rawEvent.id}:`, error);
+                }
+            }
+        }
     }
 
     async pullRequest(payload: any) {
         const pr = payload.pull_request;
+        if (!pr) return;
 
-        console.log(pr);
+        const repoFullName = payload.repository?.full_name;
+        const installationId = payload.installation?.id;
 
-        // const raw = await this.databaseService.rawEvent.create({
-        //     data: {
-        //         projectId: null,
-        //         integrationId: null,
-        //         source: ExternalProvider.GITHUB,
-        //         sourceId: String(pr.id),
-        //         eventType: RawEventType.PULL_REQUEST,
-        //         authorName: pr.user.login,
-        //         timestamp: new Date(pr.created_at),
-        //         content: pr.title,
-        //         metadata: payload,
-        //     },
-        // });
+        if (!repoFullName && !installationId) {
+            console.warn('GitHub PR webhook: missing repository and installation info');
+            return;
+        }
 
-        // LATER
-        // await this.llm.processRawEvent(raw.id);
+        // Find integration
+        const integration = await this.databaseService.integration.findFirst({
+            where: {
+                type: ExternalProvider.GITHUB,
+                ...(installationId ? { externalAccountId: String(installationId) } : {}),
+            },
+            include: { organization: true },
+        });
+
+        if (!integration) {
+            console.warn(`GitHub PR webhook: Integration not found for installation ${installationId}`);
+            return;
+        }
+
+        // Find IntegrationResource for this repo
+        const resource = repoFullName
+            ? await this.databaseService.integrationResource.findFirst({
+                  where: {
+                      integrationId: integration.id,
+                      provider: ExternalProvider.GITHUB,
+                      providerId: String(payload.repository.id),
+                  },
+              })
+            : null;
+
+        // Find projects connected to this integration that include this repo
+        const connections = await this.databaseService.integrationConnection.findMany({
+            where: {
+                integrationId: integration.id,
+                ...(repoFullName && resource
+                    ? {
+                          items: {
+                              path: ['repos'],
+                              array_contains: repoFullName,
+                          },
+                      }
+                    : {}),
+            },
+            include: { project: true },
+        });
+
+        // Resolve author identity
+        const authorId = pr.user?.id || pr.user?.login;
+        const { identityId, memberId } = authorId
+            ? await this.resolveAuthorIdentity(integration.organizationId, String(authorId), pr.user?.login, pr.user?.email)
+            : { identityId: null, memberId: null };
+
+        // Create RawEvent for each connected project
+        const projectsToProcess = connections.length > 0 ? connections.map((c) => c.project) : [null];
+
+        for (const project of projectsToProcess) {
+            const rawEvent = await this.databaseService.rawEvent.create({
+                data: {
+                    integrationId: integration.id,
+                    projectId: project?.id || null,
+                    resourceId: resource?.providerId || String(payload.repository.id),
+                    source: ExternalProvider.GITHUB,
+                    sourceId: String(pr.id),
+                    eventType: RawEventType.PULL_REQUEST,
+                    authorIdentityId: identityId,
+                    authorMemberId: memberId,
+                    authorName: pr.user?.login,
+                    authorEmail: pr.user?.email,
+                    timestamp: new Date(pr.created_at || pr.updated_at || Date.now()),
+                    content: pr.title,
+                    metadata: {
+                        repository: payload.repository,
+                        action: payload.action,
+                        pull_request: {
+                            number: pr.number,
+                            state: pr.state,
+                            merged: pr.merged,
+                            mergeable: pr.mergeable,
+                            additions: pr.additions,
+                            deletions: pr.deletions,
+                            changed_files: pr.changed_files,
+                            base: pr.base,
+                            head: pr.head,
+                        },
+                    },
+                },
+            });
+
+            // Queue LLM processing if project exists
+            if (project) {
+                try {
+                    await this.llmService.processRawEvent(rawEvent.id);
+                } catch (error) {
+                    console.error(`Failed to process RawEvent ${rawEvent.id}:`, error);
+                }
+            }
+        }
     }
 
     async issue(payload: any) {
         const issue = payload.issue;
-        console.log(issue);
+        if (!issue) return;
 
-        // const raw = await this.databaseService.rawEvent.create({
-        //     data: {
-        //         projectId: null,
-        //         integrationId: null,
-        //         source: ExternalProvider.GITHUB,
-        //         sourceId: String(issue.id),
-        //         eventType: RawEventType.ISSUE,
-        //         authorName: issue.user.login,
-        //         timestamp: new Date(issue.created_at),
-        //         content: issue.title,
-        //         metadata: payload,
-        //     },
-        // });
+        const repoFullName = payload.repository?.full_name;
+        const installationId = payload.installation?.id;
 
-        // LATER
-        // await this.llm.processRawEvent(raw.id);
+        if (!repoFullName && !installationId) {
+            console.warn('GitHub issue webhook: missing repository and installation info');
+            return;
+        }
+
+        // Find integration
+        const integration = await this.databaseService.integration.findFirst({
+            where: {
+                type: ExternalProvider.GITHUB,
+                ...(installationId ? { externalAccountId: String(installationId) } : {}),
+            },
+            include: { organization: true },
+        });
+
+        if (!integration) {
+            console.warn(`GitHub issue webhook: Integration not found for installation ${installationId}`);
+            return;
+        }
+
+        // Find IntegrationResource for this repo
+        const resource = repoFullName
+            ? await this.databaseService.integrationResource.findFirst({
+                  where: {
+                      integrationId: integration.id,
+                      provider: ExternalProvider.GITHUB,
+                      providerId: String(payload.repository.id),
+                  },
+              })
+            : null;
+
+        // Find projects connected to this integration that include this repo
+        const connections = await this.databaseService.integrationConnection.findMany({
+            where: {
+                integrationId: integration.id,
+                ...(repoFullName && resource
+                    ? {
+                          items: {
+                              path: ['repos'],
+                              array_contains: repoFullName,
+                          },
+                      }
+                    : {}),
+            },
+            include: { project: true },
+        });
+
+        // Resolve author identity
+        const authorId = issue.user?.id || issue.user?.login;
+        const { identityId, memberId } = authorId
+            ? await this.resolveAuthorIdentity(integration.organizationId, String(authorId), issue.user?.login, issue.user?.email)
+            : { identityId: null, memberId: null };
+
+        // Create RawEvent for each connected project
+        const projectsToProcess = connections.length > 0 ? connections.map((c) => c.project) : [null];
+
+        for (const project of projectsToProcess) {
+            const rawEvent = await this.databaseService.rawEvent.create({
+                data: {
+                    integrationId: integration.id,
+                    projectId: project?.id || null,
+                    resourceId: resource?.providerId || String(payload.repository.id),
+                    source: ExternalProvider.GITHUB,
+                    sourceId: String(issue.id),
+                    eventType: RawEventType.ISSUE,
+                    authorIdentityId: identityId,
+                    authorMemberId: memberId,
+                    authorName: issue.user?.login,
+                    authorEmail: issue.user?.email,
+                    timestamp: new Date(issue.created_at || issue.updated_at || Date.now()),
+                    content: issue.title,
+                    metadata: {
+                        repository: payload.repository,
+                        action: payload.action,
+                        issue: {
+                            number: issue.number,
+                            state: issue.state,
+                            labels: issue.labels,
+                            assignees: issue.assignees,
+                            milestone: issue.milestone,
+                            comments: issue.comments,
+                            body: issue.body,
+                        },
+                    },
+                },
+            });
+
+            // Queue LLM processing if project exists
+            if (project) {
+                try {
+                    await this.llmService.processRawEvent(rawEvent.id);
+                } catch (error) {
+                    console.error(`Failed to process RawEvent ${rawEvent.id}:`, error);
+                }
+            }
+        }
     }
 
 
@@ -617,13 +955,31 @@ export class GithubService {
 
         if (stats.total > 10) {
             try {
+                // Get organizationId from integration
+                const integration = await this.databaseService.integration.findUnique({
+                    where: { id: integrationId },
+                    select: { organizationId: true },
+                });
+
+                if (!integration) {
+                    throw new BadRequestException(`Integration ${integrationId} not found`);
+                }
+
+                const organizationId = integration.organizationId;
+
+                // Use LlmService methods instead of helper functions
                 const [summary, quality, securityResult] = await Promise.all([
-                    summarizeCodeChange({
-                        title: commit.message,
-                        files: normalizedFiles,
-                    }),
-                    analyzeCodeQuality({ files: normalizedFiles }),
-                    analyzeSecurityRisk({ files: normalizedFiles }),
+                    this.llmService.summarizeCodeChange(
+                        organizationId,
+                        {
+                            title: commit.message,
+                            description: commit.message,
+                            files: normalizedFiles,
+                        },
+                        sha // Use commit SHA as referenceId
+                    ),
+                    this.llmService.analyzeCodeQuality(organizationId, { files: normalizedFiles }, sha),
+                    this.llmService.analyzeSecurityRisk(organizationId, { files: normalizedFiles }, sha),
                 ]);
 
                 aiSummary = summary;
@@ -740,12 +1096,26 @@ export class GithubService {
             throw new BadRequestException("No auto-fixable security issues");
         }
 
-        const fixText = await generateDebugFix({
-            issueTitle: detail.security.summary,
-            recentDiffs: detail.files
-                .map((f: any) => `File: ${f.filename}\n${f.patch ?? ""}`)
-                .join("\n\n"),
+        // Get organizationId from integration
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
+            select: { organizationId: true },
         });
+
+        if (!integration) {
+            throw new BadRequestException(`Integration ${integrationId} not found`);
+        }
+
+        const fixText = await this.llmService.generateDebugFix(
+            integration.organizationId,
+            {
+                issueTitle: detail.security.summary,
+                recentDiffs: detail.files
+                    .map((f: any) => `File: ${f.filename}\n${f.patch ?? ""}`)
+                    .join("\n\n"),
+            },
+            sha // Use commit SHA as referenceId
+        );
 
         return {
             explanation: fixText,

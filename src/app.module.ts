@@ -18,6 +18,11 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { GithubModule } from './modules/providers/github/github.module';
+import { DiscordModule } from './modules/providers/discord/discord.module';
+import { SlackModule } from './modules/providers/slack/slack.module';
+import { JiraModule } from './modules/providers/jira/jira.module';
+import { NotionModule } from './modules/providers/notion/notion.module';
+import { FigmaModule } from './modules/providers/figma/figma.module';
 
 @Module({
 	imports: [
@@ -38,7 +43,12 @@ import { GithubModule } from './modules/providers/github/github.module';
 		WebhooksModule,
 		JobsModule,
 		IntegrationsModule,
-		GithubModule
+		GithubModule,
+		DiscordModule,
+		SlackModule,
+		JiraModule,
+		NotionModule,
+		FigmaModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, AppGateway],

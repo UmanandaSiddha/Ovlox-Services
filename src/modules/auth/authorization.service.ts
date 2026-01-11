@@ -23,19 +23,43 @@ export class AuthorizationService {
 
         if (!org) throw new ForbiddenException('Organization not found');
 
+        // Owner has all permissions
         if (org.ownerId === userId) return true;
 
         const member = await this.databaseService.organizationMember.findFirst({
             where: { userId, organizationId: orgId, status: OrgMemberStatus.ACTIVE },
+            include: {
+                role: {
+                    include: {
+                        rolePermissions: {
+                            include: {
+                                permission: true,
+                            },
+                        },
+                    },
+                },
+            },
         });
 
-        if (!member || !member.predefinedRole) {
+        if (!member) {
             throw new ForbiddenException('Not part of organization');
         }
 
-        const can = PREDEFINED_PERMISSIONS[member.predefinedRole]?.includes(permission);
-        if (!can) throw new ForbiddenException(`Missing permission: ${permission}`);
+        // Check predefined role first
+        if (member.predefinedRole) {
+            const can = PREDEFINED_PERMISSIONS[member.predefinedRole]?.includes(permission);
+            if (can) return true;
+        }
 
-        return true;
+        // Check custom role if roleId exists
+        if (member.roleId && member.role) {
+            const permissionCodes = member.role.rolePermissions.map(rp => rp.permission.code);
+            // Map PermissionName enum to permission code (they should match)
+            if (permissionCodes.includes(permission)) {
+                return true;
+            }
+        }
+
+        throw new ForbiddenException(`Missing permission: ${permission}`);
     }
 }

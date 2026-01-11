@@ -33,12 +33,6 @@ export class GithubController {
         @Query('installation_id') installation_id?: string,
         @Query('setup_action') setup_action?: string
     ) {
-        if (installation_id) {
-            console.log("installation_id : ", installation_id);
-            console.log("setup_action : ", setup_action);
-
-            return 'ok';
-        }
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
         const FRONTEND_URL = this.configService.get<string>('FRONTEND_URL');
 
@@ -46,14 +40,30 @@ export class GithubController {
             throw new BadRequestException("Something went wrong");
         }
 
-        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state);
+        // Handle GitHub App installation callback
+        if (installation_id) {
+            const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
+            if (!payload) {
+                throw new HttpException('Invalid state', HttpStatus.BAD_REQUEST);
+            }
+
+            const { orgId, integrationId } = JSON.parse(payload);
+
+            // The installation webhook will handle updating the integration
+            // This callback just confirms the installation was completed
+            // Redirect to frontend
+            return `<script>window.location.href = '${FRONTEND_URL}/integrations?status=installed&installation_id=${installation_id}'</script>`;
+        }
+
+        // Handle OAuth callback (legacy OAuth flow)
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
         if (!payload) throw new HttpException('Invalid state', HttpStatus.BAD_REQUEST);
 
         const { orgId } = JSON.parse(payload);
 
         await this.githubService.handleOAuthCallback(code, orgId);
 
-        return 'ok';
+        return `<script>window.location.href = '${FRONTEND_URL}/integrations?status=connected'</script>`;
     }
 
     @Post('webhook')
@@ -73,6 +83,12 @@ export class GithubController {
     @Get('repo/:id')
     getInstallationRepos(@Param('id') integrationId: string) {
         return this.githubService.fetchInstallationRepos(integrationId);
+    }
+
+    @UseGuards(AuthGuard)
+    @Post('sync-repos/:id')
+    async syncRepos(@Param('id') integrationId: string) {
+        return this.githubService.syncRepositories(integrationId);
     }
 
     @UseGuards(AuthGuard)
