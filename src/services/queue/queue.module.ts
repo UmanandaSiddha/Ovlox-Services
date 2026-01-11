@@ -18,6 +18,7 @@ import { ConnectionOptions } from 'bullmq';
 @Global()
 @Module({
     imports: [
+        ConfigModule,
         LoggerModule,
         DatabaseModule,
         LlmModule,

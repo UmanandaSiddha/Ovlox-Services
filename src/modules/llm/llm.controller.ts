@@ -1,6 +1,9 @@
 import { Controller, Post, Get, Put, Body, Param, Query, UseGuards, BadRequestException } from '@nestjs/common';
 import { LlmService } from './llm.service';
 import { AuthGuard, getUser } from '../auth/guards/auth.guard';
+import { PermissionGuard } from '../auth/guards/permission.guard';
+import { RequirePermission } from '../auth/decorator/permission.decorator';
+import { PermissionName, ReportType } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { ConversationType } from 'generated/prisma/enums';
 
@@ -254,5 +257,95 @@ export class LlmController {
         });
 
         return result;
+    }
+}
+
+@Controller('orgs/:orgId/projects/:projectId/reports')
+@UseGuards(AuthGuard, PermissionGuard)
+export class ReportsController {
+    constructor(
+        private readonly llmService: LlmService,
+        private readonly databaseService: DatabaseService,
+    ) { }
+
+    @Post('generate')
+    @RequirePermission(PermissionName.VIEW_REPORTS)
+    async generateReport(
+        @Param('orgId') orgId: string,
+        @Param('projectId') projectId: string,
+        @Body() body: { type: ReportType; startDate?: string; endDate?: string },
+        @getUser('id') userId: string,
+    ) {
+        const { type, startDate, endDate } = body;
+
+        // Default dates if not provided (last 7 days)
+        const periodEnd = endDate ? new Date(endDate) : new Date();
+        const periodStart = startDate ? new Date(startDate) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+        // Map ReportType enum - convert string to proper type
+        let reportType: 'DAILY' | 'WEEKLY' | 'MONTHLY' = 'DAILY';
+        if (type === 'DAILY' || type === 'WEEKLY' || type === 'MONTHLY') {
+            reportType = type;
+        }
+
+        // Generate report using LlmService
+        const reportResult = await this.llmService.generateProjectReport({
+            projectId,
+            periodStart,
+            periodEnd,
+            reportType,
+            generatedById: userId,
+        });
+
+        // Report is already created by LlmService, just fetch it
+        const report = await this.databaseService.projectReport.findUnique({
+            where: { id: reportResult.reportId },
+            include: {
+                generatedBy: true,
+            },
+        });
+
+        return report || reportResult;
+    }
+
+    @Get()
+    @RequirePermission(PermissionName.VIEW_REPORTS)
+    async getReports(
+        @Param('projectId') projectId: string,
+        @Query('type') type?: ReportType,
+        @Query('limit') limit?: string,
+        @Query('offset') offset?: string,
+    ) {
+        const reports = await this.databaseService.projectReport.findMany({
+            where: {
+                projectId,
+                ...(type ? { reportType: type } : {}),
+            },
+            orderBy: { createdAt: 'desc' },
+            take: limit ? parseInt(limit) : 50,
+            skip: offset ? parseInt(offset) : 0,
+            include: {
+                generatedBy: true,
+            },
+        });
+
+        return reports;
+    }
+
+    @Get(':id')
+    @RequirePermission(PermissionName.VIEW_REPORTS)
+    async getReport(@Param('id') id: string) {
+        const report = await this.databaseService.projectReport.findUnique({
+            where: { id },
+            include: {
+                generatedBy: true,
+            },
+        });
+
+        if (!report) {
+            throw new BadRequestException('Report not found');
+        }
+
+        return report;
     }
 }

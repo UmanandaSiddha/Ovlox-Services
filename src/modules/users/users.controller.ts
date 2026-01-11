@@ -22,7 +22,7 @@ export class UserController {
     // UPDATE-DETAILS
     @Put('update-details')
     updateDetails(@Body() dto: UserDetailsDto, @getUser('id') userId: string) {
-        return this.updateDetails(dto, userId);
+        return this.userService.updateUserDetails(userId, dto);
     }
 
     // ME

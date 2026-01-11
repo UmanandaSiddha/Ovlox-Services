@@ -1,25 +1,28 @@
-import { Injectable } from '@nestjs/common';
-import { ExternalProvider, IntegrationAuthType, IntegrationStatus, PredefinedOrgRole } from 'generated/prisma/enums';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ExternalProvider, IntegrationAuthType, IntegrationStatus, PredefinedOrgRole, InviteStatus, OrgMemberStatus } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { CreateOrgDto } from './dto/createOrg.dto';
 import { PrismaApiFeatures, QueryString } from 'src/utils/apiFeatures';
 import { Prisma } from 'generated/prisma/client';
 import { RedisService } from 'src/services/redis/redis.service';
 import { REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX } from 'src/config/constants';
+import { EmailQueue } from 'src/services/queue/email.queue';
+import { ConfigService } from '@nestjs/config';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class OrganizationsService {
     constructor(
         private readonly databaseService: DatabaseService,
-        private readonly redisService: RedisService
+        private readonly redisService: RedisService,
+        private readonly emailQueue: EmailQueue,
+        private readonly configService: ConfigService
     ) { }
 
     async createOrg(ownerId: string, dto: CreateOrgDto) {
         const { name, inviteMembers, appProviders } = dto;
 
         const slug = name.toLowerCase().replace(/[^\w]+/g, '-').slice(0, 50);
-
-        // TODO: EMAIL QUEUE PUSH FOR INVITING MEMBERS
 
         const organization = await this.databaseService.organization.create({
             data: {
@@ -56,6 +59,31 @@ export class OrganizationsService {
                 }
             },
         });
+
+        // Send invite emails
+        if (inviteMembers && inviteMembers.length > 0) {
+            const FRONTEND_URL = this.configService.get<string>('FRONTEND_URL');
+            for (const invite of inviteMembers) {
+                const inviteRecord = await this.databaseService.invite.findFirst({
+                    where: {
+                        organizationId: organization.id,
+                        email: invite.email
+                    }
+                });
+                if (inviteRecord) {
+                    const inviteUrl = `${FRONTEND_URL}/invites/accept?token=${inviteRecord.token}`;
+                    await this.emailQueue.enqueue({
+                        to: invite.email,
+                        subject: `Invitation to join ${name}`,
+                        template: 'invite',
+                        data: {
+                            organizationName: name,
+                            inviteUrl,
+                        }
+                    });
+                }
+            }
+        }
 
         return { message: "Organization Created Successfully", organization }
     }
@@ -157,5 +185,248 @@ export class OrganizationsService {
         )
 
         return { integrations }
+    }
+
+    async updateOrg(orgId: string, userId: string, data: { name?: string }) {
+        const org = await this.databaseService.organization.findFirst({
+            where: { id: orgId, ownerId: userId }
+        });
+        if (!org) throw new NotFoundException('Organization not found');
+
+        const updateData: any = {};
+        if (data.name) {
+            updateData.name = data.name;
+            updateData.slug = data.name.toLowerCase().replace(/[^\w]+/g, '-').slice(0, 50);
+        }
+
+        return this.databaseService.organization.update({
+            where: { id: orgId },
+            data: updateData,
+        });
+    }
+
+    async deleteOrg(orgId: string, userId: string) {
+        const org = await this.databaseService.organization.findFirst({
+            where: { id: orgId, ownerId: userId }
+        });
+        if (!org) throw new NotFoundException('Organization not found');
+
+        await this.databaseService.organization.delete({
+            where: { id: orgId }
+        });
+        return { message: 'Organization deleted successfully' };
+    }
+
+    async inviteMember(orgId: string, inviterId: string, email: string, predefinedRole?: PredefinedOrgRole, roleId?: string) {
+        const org = await this.databaseService.organization.findUnique({
+            where: { id: orgId }
+        });
+        if (!org) throw new NotFoundException('Organization not found');
+
+        // Check if user already exists
+        const user = await this.databaseService.user.findUnique({
+            where: { email }
+        });
+
+        // Check if already a member
+        if (user) {
+            const existingMember = await this.databaseService.organizationMember.findFirst({
+                where: { organizationId: orgId, userId: user.id }
+            });
+            if (existingMember) {
+                throw new BadRequestException('User is already a member of this organization');
+            }
+        }
+
+        // Check if invite already exists
+        const existingInvite = await this.databaseService.invite.findFirst({
+            where: { organizationId: orgId, email, status: InviteStatus.PENDING }
+        });
+        if (existingInvite) {
+            throw new BadRequestException('Invite already sent to this email');
+        }
+
+        const token = crypto.randomUUID();
+        const invite = await this.databaseService.invite.create({
+            data: {
+                organizationId: orgId,
+                email,
+                predefinedRole,
+                roleId,
+                invitedBy: inviterId,
+                token,
+                userId: user?.id,
+            }
+        });
+
+        // Send invite email
+        const FRONTEND_URL = this.configService.get<string>('FRONTEND_URL');
+        const inviteUrl = `${FRONTEND_URL}/invites/accept?token=${token}`;
+        
+        await this.emailQueue.enqueue({
+            to: email,
+            subject: `Invitation to join ${org.name}`,
+            template: 'invite',
+            data: {
+                organizationName: org.name,
+                inviteUrl,
+            }
+        });
+
+        return invite;
+    }
+
+    async acceptInvite(token: string, userId: string) {
+        const invite = await this.databaseService.invite.findUnique({
+            where: { token },
+            include: { organization: true }
+        });
+
+        if (!invite) throw new NotFoundException('Invite not found');
+        if (invite.status !== InviteStatus.PENDING) {
+            throw new BadRequestException('Invite has already been processed');
+        }
+
+        // Verify user email matches invite email
+        const user = await this.databaseService.user.findUnique({
+            where: { id: userId }
+        });
+        if (!user || user.email !== invite.email) {
+            throw new BadRequestException('Email does not match invite');
+        }
+
+        // Check if already a member
+        const existingMember = await this.databaseService.organizationMember.findFirst({
+            where: { organizationId: invite.organizationId, userId }
+        });
+        if (existingMember) {
+            throw new BadRequestException('User is already a member');
+        }
+
+        // Create member and update invite
+        await this.databaseService.$transaction([
+            this.databaseService.organizationMember.create({
+                data: {
+                    organizationId: invite.organizationId,
+                    userId,
+                    predefinedRole: invite.predefinedRole,
+                    roleId: invite.roleId,
+                    invitedBy: invite.invitedBy,
+                    status: OrgMemberStatus.ACTIVE,
+                }
+            }),
+            this.databaseService.invite.update({
+                where: { id: invite.id },
+                data: {
+                    status: InviteStatus.ACCEPTED,
+                    userId,
+                }
+            })
+        ]);
+
+        return { message: 'Invite accepted successfully' };
+    }
+
+    async listInvites(orgId: string, filters: QueryString) {
+        const apiFeatures = new PrismaApiFeatures<
+            Prisma.InviteWhereInput,
+            Prisma.InviteInclude,
+            Prisma.InviteOrderByWithRelationInput,
+            typeof this.databaseService.invite
+        >(this.databaseService.invite, filters)
+            .where({ organizationId: orgId })
+            .search(['email'])
+            .filter()
+            .sort()
+            .pagination();
+
+        const { results: invites, totalCount } = await apiFeatures.execute();
+
+        return {
+            success: true,
+            count: invites.length,
+            totalCount,
+            totalPages: Math.ceil(totalCount / (Number(filters.limit) || 10)),
+            data: invites,
+        };
+    }
+
+    async listMembers(orgId: string, filters: QueryString) {
+        const apiFeatures = new PrismaApiFeatures<
+            Prisma.OrganizationMemberWhereInput,
+            Prisma.OrganizationMemberInclude,
+            Prisma.OrganizationMemberOrderByWithRelationInput,
+            typeof this.databaseService.organizationMember
+        >(this.databaseService.organizationMember, filters)
+            .where({ organizationId: orgId, status: OrgMemberStatus.ACTIVE })
+            .include({
+                user: {
+                    select: {
+                        id: true,
+                        email: true,
+                        firstName: true,
+                        lastName: true,
+                        avatarUrl: true
+                    }
+                },
+                role: {
+                    include: {
+                        rolePermissions: {
+                            include: {
+                                permission: true
+                            }
+                        }
+                    }
+                }
+            })
+            .pagination();
+
+        const { results: members, totalCount } = await apiFeatures.execute();
+
+        return {
+            success: true,
+            count: members.length,
+            totalCount,
+            totalPages: Math.ceil(totalCount / (Number(filters.limit) || 10)),
+            data: members,
+        };
+    }
+
+    async updateMemberRole(orgId: string, memberId: string, predefinedRole?: PredefinedOrgRole, roleId?: string) {
+        const member = await this.databaseService.organizationMember.findFirst({
+            where: { id: memberId, organizationId: orgId }
+        });
+        if (!member) throw new NotFoundException('Member not found');
+
+        // Cannot change owner role
+        if (member.predefinedRole === PredefinedOrgRole.OWNER) {
+            throw new BadRequestException('Cannot change owner role');
+        }
+
+        return this.databaseService.organizationMember.update({
+            where: { id: memberId },
+            data: {
+                predefinedRole,
+                roleId,
+            }
+        });
+    }
+
+    async removeMember(orgId: string, memberId: string) {
+        const member = await this.databaseService.organizationMember.findFirst({
+            where: { id: memberId, organizationId: orgId }
+        });
+        if (!member) throw new NotFoundException('Member not found');
+
+        // Cannot remove owner
+        if (member.predefinedRole === PredefinedOrgRole.OWNER) {
+            throw new BadRequestException('Cannot remove organization owner');
+        }
+
+        await this.databaseService.organizationMember.delete({
+            where: { id: memberId }
+        });
+
+        return { message: 'Member removed successfully' };
     }
 }

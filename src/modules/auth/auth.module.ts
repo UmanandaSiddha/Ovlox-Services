@@ -4,8 +4,10 @@ import { AuthService } from './auth.service';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthGuard } from './guards/auth.guard';
+import { PermissionGuard } from './guards/permission.guard';
 import { DatabaseModule } from 'src/services/database/database.module';
 import { SocketGuard } from './guards/socket.guard';
+import { AuthorizationService } from './authorization.service';
 
 @Module({
 	imports: [
@@ -20,7 +22,7 @@ import { SocketGuard } from './guards/socket.guard';
 		}),
 	],
 	controllers: [AuthController],
-	providers: [AuthService, AuthGuard, SocketGuard],
-	exports: [AuthService, JwtModule, AuthGuard, SocketGuard],
+	providers: [AuthService, AuthGuard, PermissionGuard, SocketGuard, AuthorizationService],
+	exports: [AuthService, JwtModule, AuthGuard, PermissionGuard, SocketGuard, AuthorizationService],
 })
 export class AuthModule { }

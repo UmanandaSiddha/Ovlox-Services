@@ -884,6 +884,16 @@ Return JSON in this exact format:
     "resolvedIssues": number,
     "keyAchievements": string[]
   },
+  "codeQuality": {
+    "issuesFound": number,
+    "improvements": string[],
+    "recommendations": string[]
+  },
+  "security": {
+    "concerns": string[],
+    "recommendations": string[],
+    "riskLevel": "LOW" | "MEDIUM" | "HIGH"
+  },
   "insights": string  // 2-3 sentences of key insights or trends
 }
 
@@ -918,6 +928,16 @@ Generate a comprehensive project status report.`;
                     mergedPRs: number;
                     resolvedIssues: number;
                     keyAchievements: string[];
+                };
+                codeQuality: {
+                    issuesFound: number;
+                    improvements: string[];
+                    recommendations: string[];
+                };
+                security: {
+                    concerns: string[];
+                    recommendations: string[];
+                    riskLevel: 'LOW' | 'MEDIUM' | 'HIGH';
                 };
                 insights: string;
             };
@@ -964,7 +984,19 @@ Generate a comprehensive project status report.`;
                     periodStart,
                     periodEnd,
                     summary: result.summary,
-                    highlights: result.highlights,
+                    highlights: {
+                        ...result.highlights,
+                        codeQuality: result.codeQuality || {
+                            issuesFound: 0,
+                            improvements: [],
+                            recommendations: [],
+                        },
+                        security: result.security || {
+                            concerns: [],
+                            recommendations: [],
+                            riskLevel: 'LOW',
+                        },
+                    },
                     metrics: {
                         commits,
                         pullRequests,
@@ -980,6 +1012,8 @@ Generate a comprehensive project status report.`;
                             completed: featuresCompleted,
                             inProgress: featuresInProgress,
                         },
+                        codeQualityReports: 0,
+                        securityReports: 0,
                     },
                     featuresStatus: {
                         total: featuresTotal,

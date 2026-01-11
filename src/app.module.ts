@@ -14,15 +14,20 @@ import { DatabaseModule } from './services/database/database.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { LlmModule } from './modules/llm/llm.module';
-import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { JobsModule } from './modules/jobs/jobs.module';
-import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { GithubModule } from './modules/providers/github/github.module';
 import { DiscordModule } from './modules/providers/discord/discord.module';
 import { SlackModule } from './modules/providers/slack/slack.module';
 import { JiraModule } from './modules/providers/jira/jira.module';
 import { NotionModule } from './modules/providers/notion/notion.module';
 import { FigmaModule } from './modules/providers/figma/figma.module';
+import { PaymentsModule } from './modules/payments/payments.module';
+import { TasksModule } from './modules/tasks/tasks.module';
+import { FeaturesModule } from './modules/features/features.module';
+import { ContributorsModule } from './modules/contributors/contributors.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { StorageModule } from './modules/storage/storage.module';
+import { AnalyticsModule } from './modules/analytics/analytics.module';
 
 @Module({
 	imports: [
@@ -40,15 +45,20 @@ import { FigmaModule } from './modules/providers/figma/figma.module';
 		OrganizationsModule,
 		ProjectsModule,
 		LlmModule,
-		WebhooksModule,
 		JobsModule,
-		IntegrationsModule,
 		GithubModule,
 		DiscordModule,
 		SlackModule,
 		JiraModule,
 		NotionModule,
 		FigmaModule,
+		PaymentsModule,
+		TasksModule,
+		FeaturesModule,
+		ContributorsModule,
+		RolesModule,
+		StorageModule,
+		AnalyticsModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, AppGateway],
