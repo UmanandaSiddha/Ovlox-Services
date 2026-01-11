@@ -1,11 +1,15 @@
-import { Controller, Post, Get, Put, Body, Param, Query, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Get, Put, Body, Param, Query, UseGuards, BadRequestException, HttpCode, HttpStatus, Sse, Header } from '@nestjs/common';
 import { LlmService } from './llm.service';
 import { AuthGuard, getUser } from '../auth/guards/auth.guard';
 import { PermissionGuard } from '../auth/guards/permission.guard';
 import { RequirePermission } from '../auth/decorator/permission.decorator';
-import { PermissionName, ReportType } from 'generated/prisma/enums';
+import { PermissionName, ReportType, JobStatus, ChatRole } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { ConversationType } from 'generated/prisma/enums';
+import { ChatGateway } from '../chat/chat.gateway';
+import { LLMQueue } from 'src/services/queue/llm.queue';
+import { interval, Observable } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 
 @UseGuards(AuthGuard)
 @Controller('chat')
@@ -13,6 +17,8 @@ export class LlmController {
     constructor(
         private readonly llmService: LlmService,
         private readonly databaseService: DatabaseService,
+        private readonly chatGateway: ChatGateway,
+        private readonly llmQueue: LLMQueue,
     ) { }
 
     @Post('conversations')
@@ -187,6 +193,7 @@ export class LlmController {
     }
 
     @Post('conversations/:id/messages')
+    @HttpCode(HttpStatus.ACCEPTED)
     async sendMessage(
         @Param('id') conversationId: string,
         @getUser('id') userId: string,
@@ -247,16 +254,197 @@ export class LlmController {
             memberId = member?.id;
         }
 
-        // Use LlmService.chat method
-        const result = await this.llmService.chat({
+        // Create user message immediately
+        const userMessage = await this.databaseService.chatMessage.create({
+            data: {
+                conversationId,
+                role: ChatRole.USER,
+                content: question.trim(),
+                senderId: userId,
+                senderMemberId: memberId || undefined,
+            },
+            include: {
+                sender: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        avatarUrl: true,
+                    },
+                },
+                senderMember: {
+                    include: {
+                        user: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                                avatarUrl: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        // Emit user message immediately via WebSocket
+        await this.chatGateway.emitToConversation(conversationId, 'newMessage', {
+            message: userMessage,
+            conversationId,
+        });
+
+        // Create Job record for tracking
+        const job = await this.databaseService.job.create({
+            data: {
+                type: 'llm_chat',
+                payload: {
+                    conversationId,
+                    question,
+                    userId,
+                    projectId: conversation.projectId || undefined,
+                    organizationId: conversation.project?.organizationId || conversation.organizationId || undefined,
+                    userMessageId: userMessage.id,
+                },
+                status: JobStatus.PENDING,
+            },
+        });
+
+        // Queue LLM processing
+        await this.llmQueue.enqueue({
+            mode: 'chat',
             conversationId,
             question,
             userId,
             projectId: conversation.projectId || undefined,
             organizationId: conversation.project?.organizationId || conversation.organizationId || undefined,
+            jobId: job.id, // Link BullMQ job to DB job
+            userMessageId: userMessage.id,
         });
 
-        return result;
+        // Emit processing status
+        await this.chatGateway.emitToConversation(conversationId, 'messageProcessing', {
+            conversationId,
+            userMessageId: userMessage.id,
+            jobId: job.id,
+            status: 'processing',
+        });
+
+        // Return immediately with job info
+        return {
+            status: 'processing',
+            jobId: job.id,
+            userMessage,
+            message: 'Your message is being processed...',
+        };
+    }
+
+    @Get('jobs/:jobId/status')
+    async getJobStatus(@Param('jobId') jobId: string, @getUser('id') userId: string) {
+        const job = await this.databaseService.job.findUnique({
+            where: { id: jobId },
+        });
+
+        if (!job) {
+            throw new BadRequestException('Job not found');
+        }
+
+        // Verify user has access (check if job is related to user's conversations/projects)
+        const payload = job.payload as any;
+        if (payload.userId && payload.userId !== userId) {
+            throw new BadRequestException('Access denied');
+        }
+
+        return job;
+    }
+
+    @Post('jobs/:jobId/retry')
+    async retryJob(@Param('jobId') jobId: string, @getUser('id') userId: string) {
+        const job = await this.databaseService.job.findUnique({
+            where: { id: jobId },
+        });
+
+        if (!job) {
+            throw new BadRequestException('Job not found');
+        }
+
+        if (job.status !== JobStatus.FAILED && job.status !== JobStatus.RETRY) {
+            throw new BadRequestException('Job cannot be retried');
+        }
+
+        const payload = job.payload as any;
+        if (payload.userId && payload.userId !== userId) {
+            throw new BadRequestException('Access denied');
+        }
+
+        // Reset job status
+        await this.databaseService.job.update({
+            where: { id: jobId },
+            data: {
+                status: JobStatus.PENDING,
+                attempts: 0,
+            },
+        });
+
+        // Re-queue the job
+        await this.llmQueue.enqueue({
+            mode: payload.mode || 'chat',
+            ...payload,
+            jobId,
+        });
+
+        return {
+            status: 'queued',
+            jobId,
+            message: 'Job has been queued for retry',
+        };
+    }
+
+    @Sse('jobs/:jobId/stream')
+    @Header('Cache-Control', 'no-cache')
+    @Header('Content-Type', 'text/event-stream')
+    @Header('Connection', 'keep-alive')
+    streamJobStatus(@Param('jobId') jobId: string, @getUser('id') userId: string): Observable<MessageEvent> {
+        return interval(1000).pipe(
+            switchMap(async () => {
+                const job = await this.databaseService.job.findUnique({
+                    where: { id: jobId },
+                });
+
+                if (!job) {
+                    return { data: JSON.stringify({ error: 'Job not found' }) } as MessageEvent;
+                }
+
+                // Verify access
+                const payload = job.payload as any;
+                if (payload.userId && payload.userId !== userId) {
+                    return { data: JSON.stringify({ error: 'Access denied' }) } as MessageEvent;
+                }
+
+                // Stop streaming if job is completed or failed
+                if (job.status === 'COMPLETED' || job.status === 'FAILED') {
+                    return {
+                        data: JSON.stringify({
+                            jobId: job.id,
+                            status: job.status,
+                            attempts: job.attempts,
+                            payload: job.payload,
+                            updatedAt: job.updatedAt,
+                            completed: true,
+                        }),
+                    } as MessageEvent;
+                }
+
+                return {
+                    data: JSON.stringify({
+                        jobId: job.id,
+                        status: job.status,
+                        attempts: job.attempts,
+                        payload: job.payload,
+                        updatedAt: job.updatedAt,
+                    }),
+                } as MessageEvent;
+            }),
+        );
     }
 }
 
@@ -266,10 +454,12 @@ export class ReportsController {
     constructor(
         private readonly llmService: LlmService,
         private readonly databaseService: DatabaseService,
+        private readonly llmQueue: LLMQueue,
     ) { }
 
     @Post('generate')
     @RequirePermission(PermissionName.VIEW_REPORTS)
+    @HttpCode(HttpStatus.ACCEPTED)
     async generateReport(
         @Param('orgId') orgId: string,
         @Param('projectId') projectId: string,
@@ -288,24 +478,38 @@ export class ReportsController {
             reportType = type;
         }
 
-        // Generate report using LlmService
-        const reportResult = await this.llmService.generateProjectReport({
+        // Create Job record for tracking
+        const job = await this.databaseService.job.create({
+            data: {
+                type: 'llm_project_report',
+                payload: {
+                    projectId,
+                    periodStart: periodStart.toISOString(),
+                    periodEnd: periodEnd.toISOString(),
+                    reportType,
+                    generatedById: userId,
+                },
+                status: JobStatus.PENDING,
+            },
+        });
+
+        // Queue report generation
+        await this.llmQueue.enqueue({
+            mode: 'project_report',
             projectId,
-            periodStart,
-            periodEnd,
+            jobId: job.id,
+            periodStart: periodStart.toISOString(),
+            periodEnd: periodEnd.toISOString(),
             reportType,
             generatedById: userId,
         });
 
-        // Report is already created by LlmService, just fetch it
-        const report = await this.databaseService.projectReport.findUnique({
-            where: { id: reportResult.reportId },
-            include: {
-                generatedBy: true,
-            },
-        });
-
-        return report || reportResult;
+        // Return immediately with job info
+        return {
+            status: 'processing',
+            jobId: job.id,
+            message: 'Report generation has been queued. Use SSE endpoint or job status endpoint to track progress.',
+        };
     }
 
     @Get()

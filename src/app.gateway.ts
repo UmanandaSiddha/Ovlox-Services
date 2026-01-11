@@ -43,36 +43,51 @@ export class AppGateway
 			return;
 		}
 
-		const userId = client.handshake.query
-			?.userId as string;
-		if (!userId) {
-			client.disconnect();
-			return;
+		// Get user from SocketGuard (set in client.data.user)
+		const user = client.data.user;
+		if (!user) {
+			// Fallback to query param for backward compatibility
+			const userId = client.handshake.query?.userId as string;
+			if (!userId) {
+				client.disconnect();
+				return;
+			}
+			await this.databaseService.user.update({
+				where: { id: userId },
+				data: { isOnline: true },
+			});
+			console.log('Connected User ID:', userId, 'Socket:', client.id);
+			await this.redisService.registerSocket(userId, client.id);
+		} else {
+			// User authenticated via SocketGuard
+			await this.databaseService.user.update({
+				where: { id: user.id },
+				data: { isOnline: true },
+			});
+			console.log('Connected User ID:', user.id, 'Socket:', client.id);
+			await this.redisService.registerSocket(user.id, client.id);
 		}
-		await this.databaseService.user.update({
-			where: { id: userId },
-			data: { isOnline: true },
-		});
-		console.log('Connected User ID:', userId, 'Socket:', client.id);
-		await this.redisService.registerSocket(
-			userId,
-			client.id,
-		);
 	}
 
 	async handleDisconnect(client: Socket) {
-		const userId = await this.redisService.getUserBySocket(
-			client.id,
-		);
+		// Try to get user from SocketGuard first
+		const user = client.data.user;
+		let userId: string | null = null;
+
+		if (user) {
+			userId = user.id;
+		} else {
+			// Fallback to Redis lookup
+			userId = await this.redisService.getUserBySocket(client.id);
+		}
+
 		if (userId) {
 			await this.databaseService.user.update({
 				where: { id: userId },
 				data: { isOnline: false },
 			});
 			console.log('Disconnected User ID:', userId, 'Socket:', client.id);
-			await this.redisService.unregisterSocket(
-				client.id,
-			);
+			await this.redisService.unregisterSocket(client.id);
 		}
 	}
 

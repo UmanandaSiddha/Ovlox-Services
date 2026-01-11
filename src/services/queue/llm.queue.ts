@@ -10,6 +10,13 @@ export interface LLMJobPayload {
     projectId?: string;
     conversationId?: string;
     userId?: string;
+    organizationId?: string; // For chat and reports
+    jobId?: string; // Link to Job model for tracking
+    userMessageId?: string; // For chat - the user message that triggered this
+    periodStart?: string; // For reports
+    periodEnd?: string; // For reports
+    reportType?: 'DAILY' | 'WEEKLY' | 'MONTHLY'; // For reports
+    generatedById?: string; // For reports
 }
 
 @Injectable()

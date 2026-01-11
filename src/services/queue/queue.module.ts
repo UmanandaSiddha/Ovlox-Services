@@ -1,5 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
-import { Global, Module } from '@nestjs/common';
+import { Global, Module, forwardRef } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { EMAIL_QUEUE, INJESTION_QUEUE, LLM_QUEUE, WEBHOOK_QUEUE } from 'src/config/constants';
 import { IngestionQueue } from './ingestion.queue';
@@ -13,6 +13,7 @@ import { EmailProcessor } from './processors/email.processor';
 import { LoggerModule } from '../logger/logger.module';
 import { DatabaseModule } from '../database/database.module';
 import { LlmModule } from '../../modules/llm/llm.module';
+import { ChatModule } from '../../modules/chat/chat.module';
 import { ConnectionOptions } from 'bullmq';
 
 @Global()
@@ -21,7 +22,8 @@ import { ConnectionOptions } from 'bullmq';
         ConfigModule,
         LoggerModule,
         DatabaseModule,
-        LlmModule,
+        forwardRef(() => LlmModule),
+        ChatModule,
         BullModule.forRootAsync({
             imports: [ConfigModule],
             inject: [ConfigService],

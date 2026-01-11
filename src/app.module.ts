@@ -28,6 +28,7 @@ import { ContributorsModule } from './modules/contributors/contributors.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
+import { ChatModule } from './modules/chat/chat.module';
 
 @Module({
 	imports: [
@@ -59,6 +60,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 		RolesModule,
 		StorageModule,
 		AnalyticsModule,
+		ChatModule,
 	],
 	controllers: [AppController],
 	providers: [AppService, AppGateway],
