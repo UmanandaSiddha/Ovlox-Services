@@ -4,6 +4,7 @@ import axios from 'axios';
 import { ExternalProvider, IntegrationAuthType, IntegrationStatus, RawEventType } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { decrypt, encrypt } from 'src/utils/encryption';
+import { signState, verifyState } from 'src/utils/oauth-state';
 import { LlmService } from 'src/modules/llm/llm.service';
 
 @Injectable()
@@ -79,16 +80,26 @@ export class NotionIntegrationService {
         return decrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, config.token);
     }
 
-    getAuthUrl(orgId: string) {
+    getAuthUrl(orgId: string, integrationId: string) {
         const NOTION_CLIENT_ID = this.configService.get<string>('NOTION_CLIENT_ID');
         const API_URL = this.configService.get<string>('API_URL');
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
+
+        if (!NOTION_CLIENT_ID || !API_URL || !INTEGRATION_TOKEN_ENCRYPTION_KEY) {
+            throw new BadRequestException('Notion configuration missing');
+        }
+
+        const state = signState(
+            INTEGRATION_TOKEN_ENCRYPTION_KEY,
+            JSON.stringify({ orgId, integrationId, ts: Date.now() }),
+        );
 
         const params = new URLSearchParams({
             client_id: NOTION_CLIENT_ID!,
             redirect_uri: `${API_URL}/api/v1/integrations/notion/callback`,
             response_type: 'code',
             owner: 'user',
-            state: orgId,
+            state,
         });
         return `https://api.notion.com/v1/oauth/authorize?${params.toString()}`;
     }
@@ -102,6 +113,14 @@ export class NotionIntegrationService {
         const API_URL = this.configService.get<string>('API_URL');
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
 
+        if (!NOTION_CLIENT_ID || !NOTION_CLIENT_SECRET || !API_URL || !INTEGRATION_TOKEN_ENCRYPTION_KEY) {
+            throw new BadRequestException('Notion configuration missing');
+        }
+
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
+        if (!payload) throw new BadRequestException('Invalid or expired state');
+        const { orgId, integrationId } = JSON.parse(payload);
+
         const tokenRes = await axios.post('https://api.notion.com/v1/oauth/token', {
             grant_type: 'authorization_code',
             code,
@@ -110,31 +129,46 @@ export class NotionIntegrationService {
             auth: { username: NOTION_CLIENT_ID!, password: NOTION_CLIENT_SECRET! }
         });
 
-        const { access_token } = tokenRes.data;
+        const { access_token, workspace_id, workspace_name, bot_id, owner } = tokenRes.data;
 
-        const integration = await this.databaseService.integration.findFirst({
-            where: { organizationId: state, type: ExternalProvider.NOTION }
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
         });
+
+        const workspaceInfo = {
+            workspaceId: workspace_id,
+            workspaceName: workspace_name,
+            botId: bot_id,
+            owner,
+        };
 
         if (integration) {
             await this.databaseService.integration.update({
-                where: { id: integration.id },
+                where: { id: integrationId },
                 data: {
+                    organizationId: integration.organizationId || orgId,
                     status: IntegrationStatus.CONNECTED,
+                    authType: IntegrationAuthType.OAUTH,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token)
+                        ...(integration.config as any),
+                        ...workspaceInfo,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        connectedAt: new Date().toISOString(),
                     }
                 }
             });
         } else {
             await this.databaseService.integration.create({
                 data: {
-                    organizationId: state,
+                    id: integrationId,
+                    organizationId: orgId,
                     type: ExternalProvider.NOTION,
                     authType: IntegrationAuthType.OAUTH,
                     status: IntegrationStatus.CONNECTED,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token)
+                        ...workspaceInfo,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        connectedAt: new Date().toISOString(),
                     }
                 }
             });

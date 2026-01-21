@@ -31,8 +31,8 @@ export class DiscordService {
 
         const params = new URLSearchParams({
             client_id: DISCORD_CLIENT_ID,
-            scope: 'bot',
-            permissions: DISCORD_BOT_PERMISSIONS || '68608',
+            scope: 'bot applications.commands',
+            permissions: DISCORD_BOT_PERMISSIONS || '117760',
             redirect_uri: `${API_URL}/api/v1/integrations/discord/callback`,
             state,
         });
@@ -56,6 +56,8 @@ export class DiscordService {
         });
         const config = (integration?.config as any) || {};
 
+        const guildDetails = await this.fetchGuildDetailsSafe(guild_id);
+
         await this.databaseService.integration.update({
             where: { id: integrationId },
             data: {
@@ -64,12 +66,32 @@ export class DiscordService {
                 status: IntegrationStatus.CONNECTED,
                 config: {
                     ...config,
-                    guilds: Array.from(new Set([...(config.guilds || []), guild_id]))
+                    guilds: Array.from(new Set([...(config.guilds || []), guild_id])),
+                    guildMeta: [
+                        ...(config.guildMeta || []).filter((g: any) => g?.id && g.id !== guild_id),
+                        guildDetails || { id: guild_id },
+                    ],
+                    connectedAt: new Date().toISOString(),
                 }
             }
         });
 
         return true;
+    }
+
+    private async fetchGuildDetailsSafe(guildId: string): Promise<{ id: string; name?: string } | null> {
+        try {
+            const DISCORD_BOT_TOKEN = this.configService.get<string>('DISCORD_BOT_TOKEN');
+            if (!DISCORD_BOT_TOKEN) return { id: guildId };
+
+            const res = await axios.get(`https://discord.com/api/v10/guilds/${guildId}`, {
+                headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+            });
+
+            return { id: guildId, name: res.data?.name };
+        } catch {
+            return { id: guildId };
+        }
     }
 
     /**

@@ -292,7 +292,7 @@ export class GithubService {
             data: {
                 config: {
                     ...config,
-                    token: encrypt(process.env.INTEGRATION_TOKEN_ENCRYPTION_KEY, token),
+                    token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, token),
                     expiresAt,
                 },
             },

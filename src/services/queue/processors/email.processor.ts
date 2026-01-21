@@ -5,7 +5,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LoggerService } from 'src/services/logger/logger.service';
 import { SESClient, SendEmailCommand, SendTemplatedEmailCommand } from '@aws-sdk/client-ses';
-import { shouldSkipPayments } from 'src/utils/environment.util';
+import { shouldMockPayments } from 'src/utils/environment.util';
 
 @Injectable()
 @Processor(EMAIL_QUEUE)
@@ -41,7 +41,7 @@ export class EmailProcessor extends WorkerHost {
 
         this.logger.log(`Sending email to ${data.to}`, EmailProcessor.name);
 
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             // In development, log but don't send
             this.logger.log(`[DEV] Email would be sent to ${data.to}: ${data.subject}`, EmailProcessor.name);
             console.log('[DEV] Email:', data);

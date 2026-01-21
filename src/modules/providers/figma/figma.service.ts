@@ -4,6 +4,7 @@ import axios from 'axios';
 import { ExternalProvider, IntegrationAuthType, IntegrationStatus, RawEventType } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { decrypt, encrypt } from 'src/utils/encryption';
+import { signState, verifyState } from 'src/utils/oauth-state';
 import { LlmService } from 'src/modules/llm/llm.service';
 
 @Injectable()
@@ -79,15 +80,25 @@ export class FigmaService {
         return decrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, config.token);
     }
 
-    getAuthUrl(orgId: string) {
+    getAuthUrl(orgId: string, integrationId: string) {
         const FIGMA_CLIENT_ID = this.configService.get<string>('FIGMA_CLIENT_ID');
         const API_URL = this.configService.get<string>('API_URL');
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
+
+        if (!FIGMA_CLIENT_ID || !API_URL || !INTEGRATION_TOKEN_ENCRYPTION_KEY) {
+            throw new BadRequestException('Figma configuration missing');
+        }
+
+        const state = signState(
+            INTEGRATION_TOKEN_ENCRYPTION_KEY,
+            JSON.stringify({ orgId, integrationId, ts: Date.now() }),
+        );
 
         const params = new URLSearchParams({
             client_id: FIGMA_CLIENT_ID!,
             redirect_uri: `${API_URL}/api/v1/integrations/figma/callback`,
             scope: 'file_read',
-            state: orgId,
+            state,
             response_type: 'code',
         });
         return `https://www.figma.com/oauth?${params.toString()}`;
@@ -102,6 +113,14 @@ export class FigmaService {
         const API_URL = this.configService.get<string>('API_URL');
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
 
+        if (!FIGMA_CLIENT_ID || !FIGMA_CLIENT_SECRET || !API_URL || !INTEGRATION_TOKEN_ENCRYPTION_KEY) {
+            throw new BadRequestException('Figma configuration missing');
+        }
+
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
+        if (!payload) throw new BadRequestException('Invalid or expired state');
+        const { orgId, integrationId } = JSON.parse(payload);
+
         const tokenRes = await axios.post('https://www.figma.com/api/oauth/token', {
             client_id: FIGMA_CLIENT_ID!,
             client_secret: FIGMA_CLIENT_SECRET!,
@@ -112,29 +131,56 @@ export class FigmaService {
 
         const { access_token } = tokenRes.data;
 
-        const integration = await this.databaseService.integration.findFirst({
-            where: { organizationId: state, type: ExternalProvider.FIGMA }
+        // Fetch account info for traceability
+        let me: any = null;
+        try {
+            const meRes = await axios.get('https://api.figma.com/v1/me', {
+                headers: { 'X-Figma-Token': access_token },
+            });
+            me = meRes.data;
+        } catch {
+            // best effort; continue without throwing
+        }
+
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
         });
+
+        const userInfo = me
+            ? {
+                userId: me.id,
+                email: me.email,
+                handle: me.handle,
+            }
+            : {};
 
         if (integration) {
             await this.databaseService.integration.update({
-                where: { id: integration.id },
+                where: { id: integrationId },
                 data: {
+                    organizationId: integration.organizationId || orgId,
                     status: IntegrationStatus.CONNECTED,
+                    authType: IntegrationAuthType.OAUTH,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token)
+                        ...(integration.config as any),
+                        ...userInfo,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        connectedAt: new Date().toISOString(),
                     }
                 }
             });
         } else {
             await this.databaseService.integration.create({
                 data: {
-                    organizationId: state,
+                    id: integrationId,
+                    organizationId: orgId,
                     type: ExternalProvider.FIGMA,
                     authType: IntegrationAuthType.OAUTH,
                     status: IntegrationStatus.CONNECTED,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token)
+                        ...userInfo,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        connectedAt: new Date().toISOString(),
                     }
                 }
             });

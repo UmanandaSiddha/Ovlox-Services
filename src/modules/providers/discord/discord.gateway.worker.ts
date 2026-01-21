@@ -45,4 +45,5 @@ client.on('messageCreate', async message => {
     }
 });
 
-client.login(process.env.DISCORD_BOT_TOKEN);
+const botToken = configService.get<string>('DISCORD_BOT_TOKEN') || process.env.DISCORD_BOT_TOKEN;
+client.login(botToken);

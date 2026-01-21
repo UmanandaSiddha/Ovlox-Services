@@ -4,6 +4,7 @@ import axios from 'axios';
 import { ExternalProvider, IntegrationAuthType, IntegrationStatus, RawEventType } from 'generated/prisma/enums';
 import { DatabaseService } from 'src/services/database/database.service';
 import { decrypt, encrypt } from 'src/utils/encryption';
+import { signState, verifyState } from 'src/utils/oauth-state';
 import { LlmService } from 'src/modules/llm/llm.service';
 
 @Injectable()
@@ -121,16 +122,26 @@ export class JiraIntegrationService {
         return decrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, config.token);
     }
 
-    getAuthUrl(orgId: string) {
+    getAuthUrl(orgId: string, integrationId: string) {
         const JIRA_CLIENT_ID = this.configService.get<string>('JIRA_CLIENT_ID');
         const API_URL = this.configService.get<string>('API_URL');
+        const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
+
+        if (!JIRA_CLIENT_ID || !API_URL || !INTEGRATION_TOKEN_ENCRYPTION_KEY) {
+            throw new BadRequestException('Jira configuration missing');
+        }
+
+        const state = signState(
+            INTEGRATION_TOKEN_ENCRYPTION_KEY,
+            JSON.stringify({ orgId, integrationId, ts: Date.now() }),
+        );
 
         const params = new URLSearchParams({
             audience: 'api.atlassian.com',
-            client_id: JIRA_CLIENT_ID!,
+            client_id: JIRA_CLIENT_ID,
             scope: 'read:jira-work write:jira-work',
             redirect_uri: `${API_URL}/api/v1/integrations/jira/callback`,
-            state: orgId,
+            state,
             response_type: 'code',
         });
 
@@ -146,45 +157,78 @@ export class JiraIntegrationService {
         const API_URL = this.configService.get<string>('API_URL');
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
 
+        if (!INTEGRATION_TOKEN_ENCRYPTION_KEY || !JIRA_CLIENT_ID || !JIRA_CLIENT_SECRET || !API_URL) {
+            throw new BadRequestException('Jira configuration missing');
+        }
+
+        const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
+        if (!payload) throw new BadRequestException('Invalid or expired state');
+
+        const { orgId, integrationId } = JSON.parse(payload);
+
         const tokenRes = await axios.post('https://auth.atlassian.com/oauth/token', {
             grant_type: 'authorization_code',
-            client_id: JIRA_CLIENT_ID!,
-            client_secret: JIRA_CLIENT_SECRET!,
+            client_id: JIRA_CLIENT_ID,
+            client_secret: JIRA_CLIENT_SECRET,
             code,
             redirect_uri: `${API_URL}/api/v1/integrations/jira/callback`,
         });
 
         const { access_token, refresh_token, expires_in } = tokenRes.data;
 
-        const integration = await this.databaseService.integration.findFirst({
-            where: { organizationId: state, type: ExternalProvider.JIRA }
+        // Fetch accessible resources to capture cloud/site identity
+        const cloudRes = await axios.get('https://api.atlassian.com/oauth/token/accessible-resources', {
+            headers: { Authorization: `Bearer ${access_token}` },
         });
+
+        const firstCloud = Array.isArray(cloudRes.data) && cloudRes.data.length > 0 ? cloudRes.data[0] : null;
+
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
+        });
+
+        const cloudMetadata = firstCloud
+            ? {
+                cloudId: firstCloud.id,
+                cloudName: firstCloud.name,
+                cloudUrl: firstCloud.url,
+                scopes: firstCloud.scopes,
+            }
+            : {};
 
         if (integration) {
             await this.databaseService.integration.update({
-                where: { id: integration.id },
+                where: { id: integrationId },
                 data: {
+                    organizationId: integration.organizationId || orgId,
                     status: IntegrationStatus.CONNECTED,
+                    authType: IntegrationAuthType.OAUTH,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token),
-                        refreshToken: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, refresh_token),
-                        expiresAt: new Date(Date.now() + expires_in * 1000).toISOString()
-                    }
-                }
+                        ...(integration.config as any),
+                        ...cloudMetadata,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        refreshToken: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, refresh_token),
+                        expiresAt: new Date(Date.now() + expires_in * 1000).toISOString(),
+                        connectedAt: new Date().toISOString(),
+                    },
+                },
             });
         } else {
             await this.databaseService.integration.create({
                 data: {
-                    organizationId: state,
+                    id: integrationId,
+                    organizationId: orgId,
                     type: ExternalProvider.JIRA,
                     authType: IntegrationAuthType.OAUTH,
                     status: IntegrationStatus.CONNECTED,
                     config: {
-                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, access_token),
-                        refreshToken: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY!, refresh_token),
-                        expiresAt: new Date(Date.now() + expires_in * 1000).toISOString()
-                    }
-                }
+                        ...cloudMetadata,
+                        token: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, access_token),
+                        refreshToken: encrypt(INTEGRATION_TOKEN_ENCRYPTION_KEY, refresh_token),
+                        expiresAt: new Date(Date.now() + expires_in * 1000).toISOString(),
+                        connectedAt: new Date().toISOString(),
+                    },
+                },
             });
         }
 

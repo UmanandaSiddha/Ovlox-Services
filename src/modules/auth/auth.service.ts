@@ -48,8 +48,8 @@ export class AuthService {
 	// Generate JWT Token
 	async generateToken(userId: string, type: "ACCESS_TOKEN" | "REFRESH_TOKEN", sessionId: string | null): Promise<string> {
 		const secret = type === "ACCESS_TOKEN"
-			? process.env.ACCESS_TOKEN_SECRET
-			: process.env.REFRESH_TOKEN_SECRET;
+			? this.configService.get<string>('ACCESS_TOKEN_SECRET')
+			: this.configService.get<string>('REFRESH_TOKEN_SECRET');
 		const expiresIn = type === "ACCESS_TOKEN" ? "15m" : "7d";
 
 		const payload = type === "ACCESS_TOKEN" ? { id: userId } : { id: userId, sessionId: sessionId }
@@ -60,7 +60,7 @@ export class AuthService {
 	// Generate 6 digit OTP
 	async generateOTP(): Promise<{ otpString: string, otpToken: string, otpExpire: number }> {
 		let otpString: string;
-		if (process.env.NODE_ENV === "production") {
+		if (this.configService.get<string>('NODE_ENV') === "production") {
 			otpString = Math.floor(100000 + Math.random() * 900000).toString();
 		} else {
 			otpString = '000000';
@@ -78,7 +78,7 @@ export class AuthService {
 
 	// Send JWT Token to client cookies
 	async sendToken(res: Response, type: "ACCESS_TOKEN" | "REFRESH_TOKEN", token: string): Promise<void> {
-		const isProduction = process.env.NODE_ENV === 'production';
+		const isProduction = this.configService.get<string>('NODE_ENV') === 'production';
 		const tokenName = type === "ACCESS_TOKEN" ? 'accessToken' : 'refreshToken';
 		const age = type === "ACCESS_TOKEN" ? 15 : 7 * 24 * 60;
 
@@ -93,7 +93,7 @@ export class AuthService {
 
 	// Clear client tokens
 	async clearToken(res: Response, type: "ACCESS_TOKEN" | "REFRESH_TOKEN"): Promise<void> {
-		const isProduction = process.env.NODE_ENV === 'production';
+		const isProduction = this.configService.get<string>('NODE_ENV') === 'production';
 		const tokenName = type === "ACCESS_TOKEN" ? 'accessToken' : 'refreshToken';
 
 		res.clearCookie(tokenName, {
@@ -136,7 +136,7 @@ export class AuthService {
 			},
 		});
 
-		if (process.env.NODE_ENV === "production") {
+		if (this.configService.get<string>('NODE_ENV') === "production") {
 			// await this.sendOtp(phoneNumber, otpString);
 		}
 
@@ -169,7 +169,7 @@ export class AuthService {
 				password: hashedPassword,
 				phoneNumber,
 				email,
-				role: process.env.DEFAULT_ADMIN_PHONE === phoneNumber || process.env.DEFAULT_ADMIN_EMAIL === email ? UserRole.ADMIN : UserRole.USER,
+				role: this.configService.get<string>('DEFAULT_ADMIN_PHONE') === phoneNumber || this.configService.get<string>('DEFAULT_ADMIN_EMAIL') === email ? UserRole.ADMIN : UserRole.USER,
 				authIdentities: {
 					create: {
 						provider: AuthProvider.PASSWORD,
@@ -205,7 +205,7 @@ export class AuthService {
 		await this.sendToken(res, "ACCESS_TOKEN", accessToken);
 		await this.sendToken(res, "REFRESH_TOKEN", clientRefreshToken);
 
-		if (process.env.NODE_ENV === "production") {
+		if (this.configService.get<string>('NODE_ENV') === "production") {
 			// await this.sendOtp(phoneNumber, otpString);
 
 		}
@@ -283,7 +283,9 @@ export class AuthService {
 
 		if (!sessionId || !token) throw new UnauthorizedException('Malformed token');
 
-		const decoded = await this.jwtService.verifyAsync(token, { secret: process.env.REFRESH_TOKEN_SECRET });
+		const decoded = await this.jwtService.verifyAsync(token, {
+			secret: this.configService.get<string>('REFRESH_TOKEN_SECRET'),
+		});
 		if (!decoded) throw new UnauthorizedException('Invalid refresh token!!');
 
 		const user = await this.databaseService.user.findUnique({

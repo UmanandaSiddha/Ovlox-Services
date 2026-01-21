@@ -27,10 +27,10 @@ export class LLMProcessor extends WorkerHost {
 
         this.logger.log(`Processing LLM task mode=${data.mode} jobId=${jobId}`, LLMProcessor.name);
 
-        // Update job status to RUNNING
-        if (jobId) {
-            await this.updateJobStatus(jobId, JobStatus.RUNNING);
-        }
+            // Update job status to RUNNING (do not increment attempts here)
+            if (jobId) {
+                await this.updateJobStatus(jobId, JobStatus.RUNNING, { incrementAttempt: false });
+            }
 
         try {
             let result: any;
@@ -65,16 +65,16 @@ export class LLMProcessor extends WorkerHost {
 
             // Update job status to COMPLETED
             if (jobId) {
-                await this.updateJobStatus(jobId, JobStatus.COMPLETED, result);
+                await this.updateJobStatus(jobId, JobStatus.COMPLETED, result, undefined, { incrementAttempt: false });
             }
 
             return result;
         } catch (error) {
             this.logger.error(`LLM job processing failed: ${job.id} - ${error.message}`, LLMProcessor.name);
             
-            // Update job status to FAILED
+            // Update job status to FAILED (increment attempts for failures)
             if (jobId) {
-                await this.updateJobStatus(jobId, JobStatus.FAILED, null, error.message);
+                await this.updateJobStatus(jobId, JobStatus.FAILED, null, error.message, { incrementAttempt: true });
             }
 
             throw error;
@@ -85,7 +85,8 @@ export class LLMProcessor extends WorkerHost {
         jobId: string,
         status: JobStatus,
         result?: any,
-        error?: string
+        error?: string,
+        options?: { incrementAttempt?: boolean }
     ) {
         try {
             const currentJob = await this.databaseService.job.findUnique({
@@ -103,7 +104,7 @@ export class LLMProcessor extends WorkerHost {
                 where: { id: jobId },
                 data: {
                     status,
-                    attempts: { increment: 1 },
+                    ...(options?.incrementAttempt ? { attempts: { increment: 1 } } : {}),
                     payload: {
                         ...currentPayload,
                         ...(result ? { result } : {}),

@@ -5,7 +5,7 @@ import { AuthGuard } from 'src/modules/auth/guards/auth.guard';
 import { ConfigService } from '@nestjs/config';
 import { GithubService } from './github.service';
 
-@Controller('github')
+@Controller('integrations/github')
 export class GithubController {
     constructor(
         private readonly githubService: GithubService,

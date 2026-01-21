@@ -13,9 +13,9 @@ export class NotionController {
     ) { }
 
     @UseGuards(AuthGuard)
-    @Get('install/:orgId')
-    getInstallUrl(@Param('orgId') orgId: string) {
-        return { url: this.notionService.getAuthUrl(orgId) };
+    @Get('install/:orgId/:integrationId')
+    getInstallUrl(@Param('orgId') orgId: string, @Param('integrationId') integrationId: string) {
+        return { url: this.notionService.getAuthUrl(orgId, integrationId) };
     }
 
     @Get('callback')

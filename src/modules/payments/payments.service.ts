@@ -4,7 +4,7 @@ import { DatabaseService } from 'src/services/database/database.service';
 import { LoggerService } from 'src/services/logger/logger.service';
 import Stripe from 'stripe';
 import Decimal from 'decimal.js';
-import { shouldSkipPayments } from 'src/utils/environment.util';
+import { shouldMockPayments } from 'src/utils/environment.util';
 import { PaymentStatus, CreditTransactionStatus, CreditTransactionType, SubscriptionStatus } from 'generated/prisma/enums';
 
 @Injectable()
@@ -17,7 +17,7 @@ export class PaymentsService {
         private readonly logger: LoggerService,
     ) {
         // Initialize Stripe only if not in development
-        if (!shouldSkipPayments()) {
+        if (!shouldMockPayments()) {
             const stripeKey = this.configService.get<string>('STRIPE_SECRET_KEY');
             if (stripeKey) {
                 this.stripe = new Stripe(stripeKey, { apiVersion: '2025-12-15.clover' as any });
@@ -41,7 +41,7 @@ export class PaymentsService {
         }
 
         // Skip Stripe API call in development
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(`[DEV] Skipping Stripe customer creation for org ${orgId}`, PaymentsService.name);
             const mockCustomerId = `cus_dev_${orgId.substring(0, 8)}`;
             await this.databaseService.stripeCustomer.create({
@@ -103,7 +103,7 @@ export class PaymentsService {
         creditsAmount: Decimal,
     ): Promise<{ clientSecret: string; paymentIntentId: string }> {
         // Skip Stripe API call in development
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(
                 `[DEV] Skipping payment intent creation for org ${orgId}, amount: ${amount.toString()}, credits: ${creditsAmount.toString()}`,
                 PaymentsService.name,
@@ -248,7 +248,7 @@ export class PaymentsService {
      * Handle Stripe webhook events
      */
     async handleStripeWebhook(event: Stripe.Event): Promise<void> {
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(`[DEV] Skipping Stripe webhook: ${event.type}`, PaymentsService.name);
             return;
         }
@@ -349,7 +349,7 @@ export class PaymentsService {
         monthlyCredits?: Decimal,
     ): Promise<{ subscriptionId: string; clientSecret?: string }> {
         // Skip Stripe API call in development
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(
                 `[DEV] Skipping subscription creation for org ${orgId}, plan: ${planName}`,
                 PaymentsService.name,
@@ -580,7 +580,7 @@ export class PaymentsService {
         }
 
         // Skip Stripe API call in development
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(`[DEV] Skipping subscription cancellation for ${subscriptionId}`, PaymentsService.name);
             await this.databaseService.subscription.update({
                 where: { id: subscriptionId },
@@ -630,7 +630,7 @@ export class PaymentsService {
         const refundAmount = amount || payment.amount;
 
         // Skip Stripe API call in development
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             this.logger.log(
                 `[DEV] Skipping payment refund for ${paymentId}, amount: ${refundAmount.toString()}`,
                 PaymentsService.name,

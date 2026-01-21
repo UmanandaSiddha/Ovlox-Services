@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { LoggerService } from 'src/services/logger/logger.service';
-import { shouldSkipPayments } from 'src/utils/environment.util';
 
 @Injectable()
 export class S3Service {
@@ -47,12 +46,6 @@ export class S3Service {
             throw new BadRequestException('S3 bucket not configured');
         }
 
-        if (shouldSkipPayments()) {
-            // In development, return a mock URL
-            this.logger.log(`[DEV] Mock presigned URL generated for: ${key}`, S3Service.name);
-            return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}?mock=true`;
-        }
-
         const command = new PutObjectCommand({
             Bucket: this.bucket,
             Key: key,
@@ -81,12 +74,6 @@ export class S3Service {
     ): Promise<string> {
         if (!this.bucket) {
             throw new BadRequestException('S3 bucket not configured');
-        }
-
-        if (shouldSkipPayments()) {
-            // In development, return a mock URL
-            this.logger.log(`[DEV] Mock presigned download URL generated for: ${key}`, S3Service.name);
-            return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}?mock=true`;
         }
 
         const command = new GetObjectCommand({

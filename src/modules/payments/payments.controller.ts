@@ -22,7 +22,7 @@ import { RefundPaymentDto } from './dto/refund-payment.dto';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import Decimal from 'decimal.js';
-import { shouldSkipPayments } from 'src/utils/environment.util';
+import { shouldMockPayments } from 'src/utils/environment.util';
 import { DatabaseService } from 'src/services/database/database.service';
 import { Public } from '../auth/decorator/public.decorator';
 
@@ -36,7 +36,7 @@ export class PaymentsController {
         private readonly configService: ConfigService,
         private readonly databaseService: DatabaseService,
     ) {
-        if (!shouldSkipPayments()) {
+        if (!shouldMockPayments()) {
             const stripeKey = this.configService.get<string>('STRIPE_SECRET_KEY');
             if (stripeKey) {
                 this.stripe = new Stripe(stripeKey, { apiVersion: '2025-12-15.clover' as any });
@@ -207,7 +207,7 @@ export class PaymentsWebhookController {
         private readonly paymentsService: PaymentsService,
         private readonly configService: ConfigService,
     ) {
-        if (!shouldSkipPayments()) {
+        if (!shouldMockPayments()) {
             const stripeKey = this.configService.get<string>('STRIPE_SECRET_KEY');
             if (stripeKey) {
                 this.stripe = new Stripe(stripeKey, { apiVersion: '2025-12-15.clover' as any });
@@ -222,7 +222,7 @@ export class PaymentsWebhookController {
     ) {
         const webhookSecret = this.configService.get<string>('STRIPE_WEBHOOK_SECRET');
 
-        if (shouldSkipPayments()) {
+        if (shouldMockPayments()) {
             // In development, accept any webhook payload
             const event = req.body as any;
             await this.paymentsService.handleStripeWebhook(event);

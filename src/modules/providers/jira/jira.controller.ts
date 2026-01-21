@@ -13,9 +13,9 @@ export class JiraController {
     ) { }
 
     @UseGuards(AuthGuard)
-    @Get('install/:orgId')
-    getInstallUrl(@Param('orgId') orgId: string) {
-        return { url: this.jiraService.getAuthUrl(orgId) };
+    @Get('install/:orgId/:integrationId')
+    getInstallUrl(@Param('orgId') orgId: string, @Param('integrationId') integrationId: string) {
+        return { url: this.jiraService.getAuthUrl(orgId, integrationId) };
     }
 
     @Get('callback')

@@ -47,9 +47,9 @@ export class LlmService implements OnModuleInit {
     ) {
         const openaiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
         if (!openaiKey) {
-            this.logger.warn('OPENAI_API_KEY not found', LlmService.name);
+            this.logger.warn('OPENAI_API_KEY not found; LLM calls will fail until configured.', LlmService.name);
         }
-        this.openai = new OpenAI({ apiKey: openaiKey });
+        this.openai = new OpenAI({ apiKey: openaiKey || 'missing' });
     }
 
     async onModuleInit() {

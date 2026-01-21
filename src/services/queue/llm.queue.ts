@@ -28,7 +28,13 @@ export class LLMQueue {
     async enqueue(job: LLMJobPayload) {
         return this.queue.add('llm_task', job, {
             priority: 3,
-            attempts: 2,
+            attempts: 3,
+            backoff: {
+                type: 'exponential',
+                delay: 2000, // 2s, 4s, 8s
+            },
+            removeOnComplete: 100,
+            removeOnFail: 200,
         });
     }
 }
