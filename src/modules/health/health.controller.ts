@@ -19,4 +19,9 @@ export class RedisHealthController {
     async flushAllQueues() {
         return this.redisHealthService.flushAllQueues();
     }
+
+    @Delete('redis-cache')
+    async flushRedisCache() {
+        return this.redisHealthService.flushRedisCaches();
+    }
 }

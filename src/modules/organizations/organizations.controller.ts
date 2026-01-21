@@ -9,6 +9,7 @@ import { CreateOrgDto } from './dto/createOrg.dto';
 import { InviteMemberDto } from './dto/invite-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { UpdateOrgDto } from './dto/update-org.dto';
+import { GithubAutoConnectDto } from './dto/github-auto-connect.dto';
 import { QueryString } from 'src/utils/apiFeatures';
 import { interval, Observable, switchMap } from 'rxjs';
 
@@ -120,7 +121,39 @@ export class OrganizationsController {
         return this.orgs.acceptInvite(token, userId);
     }
 
-    @Sse('integration/status/:slug')
+    @Get(':orgId/integrations')
+    @UseGuards(PermissionGuard)
+    @RequirePermission(PermissionName.VIEW_PROJECTS)
+    async listIntegrations(
+        @getUser('id') userId: string,
+        @Param('orgId') orgId: string
+    ) {
+        return this.orgs.listIntegrationsByOrgId(userId, orgId);
+    }
+
+    @Get(':orgId/integrations/:integrationId')
+    @UseGuards(PermissionGuard)
+    @RequirePermission(PermissionName.VIEW_PROJECTS)
+    async getIntegrationStatus(
+        @getUser('id') userId: string,
+        @Param('orgId') orgId: string,
+        @Param('integrationId') integrationId: string
+    ) {
+        return this.orgs.getIntegrationStatusById(userId, orgId, integrationId);
+    }
+
+    @Post(':orgId/integrations/github/auto-connect')
+    @UseGuards(PermissionGuard)
+    @RequirePermission(PermissionName.MANAGE_INTEGRATIONS)
+    async githubAutoConnect(
+        @getUser('id') userId: string,
+        @Param('orgId') orgId: string,
+        @Body() dto: GithubAutoConnectDto
+    ) {
+        return this.orgs.githubAutoConnect(userId, orgId, dto.sourceOrgId);
+    }
+
+    @Sse('integrations/status/:slug')
     @Header('Cache-Control', 'no-cache')
     @Header('Content-Type', 'text/event-stream')
     @Header('Connection', 'keep-alive')
@@ -131,6 +164,8 @@ export class OrganizationsController {
         return interval(5000).pipe(
             switchMap(async () => {
                 const integrations = await this.orgs.integrationStatus(userId, slug);
+
+                console.log('integrations', JSON.stringify(integrations, null, 2));
 
                 return {
                     data: integrations,

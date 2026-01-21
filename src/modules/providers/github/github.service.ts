@@ -9,16 +9,85 @@ import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { LlmService } from 'src/modules/llm/llm.service';
 import { DebugFixResponse, SecurityRisk } from 'src/utils/types';
+import { RedisService } from 'src/services/redis/redis.service';
+import { REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX } from 'src/config/constants';
 
 @Injectable()
 export class GithubService {
     constructor(
         private readonly databaseService: DatabaseService,
         private readonly configService: ConfigService,
-        private readonly llmService: LlmService
+        private readonly llmService: LlmService,
+        private readonly redisService: RedisService
     ) { }
 
-    async getOAuthUrl(orgId: string) {
+    private async invalidateOrgIntegrationStatusCacheByOrgId(organizationId: string) {
+        try {
+            const org = await this.databaseService.organization.findUnique({
+                where: { id: organizationId },
+                select: { slug: true },
+            });
+            if (!org?.slug) return;
+
+            const key = `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${org.slug}`;
+            await this.redisService.del(key);
+        } catch (error) {
+            // Best-effort cache invalidation; don't break webhook processing
+            console.warn('Failed to invalidate org integration status cache', error?.message || error);
+        }
+    }
+
+    private async invalidateOrgIntegrationStatusCachesForGithubIdentity(organizationId: string) {
+        try {
+            const org = await this.databaseService.organization.findUnique({
+                where: { id: organizationId },
+                select: {
+                    ownerId: true,
+                    providers: {
+                        where: { provider: ExternalProvider.GITHUB },
+                        select: { providerUserId: true },
+                        take: 1,
+                    },
+                },
+            });
+
+            const providerUserId = org?.providers?.[0]?.providerUserId;
+            if (!org?.ownerId || !providerUserId) {
+                await this.invalidateOrgIntegrationStatusCacheByOrgId(organizationId);
+                return;
+            }
+
+            const orgs = await this.databaseService.organization.findMany({
+                where: {
+                    ownerId: org.ownerId,
+                    providers: {
+                        some: {
+                            provider: ExternalProvider.GITHUB,
+                            providerUserId,
+                        },
+                    },
+                },
+                select: { slug: true },
+            });
+
+            const keys = orgs
+                .map((o) => o.slug)
+                .filter(Boolean)
+                .map((slug) => `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${slug}`);
+
+            if (keys.length > 0) {
+                await this.redisService.del(...keys);
+            } else {
+                await this.invalidateOrgIntegrationStatusCacheByOrgId(organizationId);
+            }
+        } catch (error) {
+            // Best-effort cache invalidation; don't break request flow
+            console.warn('Failed to invalidate github identity integration status caches', error?.message || error);
+            await this.invalidateOrgIntegrationStatusCacheByOrgId(organizationId);
+        }
+    }
+
+    async getOAuthUrl(orgId: string, force = false) {
         const GITHUB_CLIENT_ID = this.configService.get<string>('GITHUB_CLIENT_ID');
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
 
@@ -33,13 +102,13 @@ export class GithubService {
             }
         });
 
-        if (provider) {
+        if (provider && !force) {
             throw new BadRequestException('Provider already exists for this user');
         }
 
         const state = signState(
             INTEGRATION_TOKEN_ENCRYPTION_KEY,
-            JSON.stringify({ orgId, ts: Date.now() })
+            JSON.stringify({ orgId, replace: force, ts: Date.now() })
         );
 
         const params = new URLSearchParams({
@@ -83,6 +152,52 @@ export class GithubService {
         };
     }
 
+    private async fetchInstallationAccountLogin(installationId: string): Promise<string | null> {
+        try {
+            const appJwt = this.createAppJwt();
+            const res = await axios.get(`https://api.github.com/app/installations/${installationId}`, {
+                headers: {
+                    Authorization: `Bearer ${appJwt}`,
+                    Accept: 'application/vnd.github+json',
+                },
+            });
+            return res.data?.account?.login ? String(res.data.account.login) : null;
+        } catch (error) {
+            // Best-effort; callback should still succeed even if lookup fails
+            return null;
+        }
+    }
+
+    async handleInstallationCallback(
+        orgId: string,
+        integrationId: string,
+        installationId: string,
+    ) {
+        const accountLogin = await this.fetchInstallationAccountLogin(installationId);
+
+        await this.databaseService.integration.updateMany({
+            where: {
+                id: integrationId,
+                organizationId: orgId,
+                type: ExternalProvider.GITHUB,
+            },
+            data: {
+                status: IntegrationStatus.CONNECTED,
+                externalAccountId: String(installationId),
+                externalAccount: accountLogin ?? undefined,
+            },
+        });
+
+        await this.invalidateOrgIntegrationStatusCachesForGithubIdentity(orgId);
+
+        return {
+            orgId,
+            integrationId,
+            installationId: String(installationId),
+            externalAccount: accountLogin,
+        };
+    }
+
     createAppJwt() {
         const GITHUB_APP_PRIVATE_KEY = this.configService.get<string>('GITHUB_APP_PRIVATE_KEY');
         const GITHUB_APP_ID = this.configService.get<string>('GITHUB_APP_ID');
@@ -121,7 +236,7 @@ export class GithubService {
         };
     }
 
-    async handleOAuthCallback(code: string, orgId: string) {
+    async handleOAuthCallback(code: string, orgId: string, replaceProvider = false) {
         const GITHUB_CLIENT_ID = this.configService.get<string>('GITHUB_CLIENT_ID');
         const GITHUB_CLIENT_SECRET = this.configService.get<string>('GITHUB_CLIENT_SECRET');
         const INTEGRATION_TOKEN_ENCRYPTION_KEY = this.configService.get<string>('INTEGRATION_TOKEN_ENCRYPTION_KEY');
@@ -149,9 +264,16 @@ export class GithubService {
             headers: { Authorization: `Bearer ${accessToken}` },
         });
 
-        console.log("User Data: ", userRes.data);
-
         const githubUser = userRes.data;
+
+        if (replaceProvider) {
+            await this.databaseService.provider.deleteMany({
+                where: {
+                    organizationId: orgId,
+                    provider: ExternalProvider.GITHUB,
+                },
+            });
+        }
 
         await this.databaseService.provider.upsert({
             where: {
@@ -172,6 +294,9 @@ export class GithubService {
                 organizationId: orgId,
             },
         });
+
+        // Invalidate cached integration status so SSE/HTTP reflects new OAuth connection immediately
+        await this.invalidateOrgIntegrationStatusCachesForGithubIdentity(orgId);
 
         return githubUser;
     }
@@ -317,8 +442,6 @@ export class GithubService {
     }
 
     async handleWebhook(event: string, payload: any) {
-        console.log("Event: ", event);
-
         await this.databaseService.webhookEvent.create({
             data: {
                 provider: ExternalProvider.GITHUB,
@@ -344,61 +467,69 @@ export class GithubService {
     }
 
     async installation(payload: any) {
-        const id = String(payload.installation.id);
+        const installationId = String(payload.installation?.id);
+        if (!installationId) return;
 
-        const provider = await this.databaseService.provider.findFirst({
-            where: {
-                provider: ExternalProvider.GITHUB,
-                providerUserId: String(payload.installation.account.id),
-            }
-        });
+        const accountLogin = payload.installation?.account?.login
+            ? String(payload.installation.account.login)
+            : null;
+
+        // NOTE:
+        // - GitHub's installation.account.id is NOT a stable reference to our OAuth Provider providerUserId.
+        // - We cannot reliably map a brand new installation to an org without the signed-state callback.
+        // Therefore, we only update org integrations already linked to this installationId.
 
         if (payload.action === 'created') {
-            const integration = await this.databaseService.integration.findFirst({
+            // Best-effort: ensure all orgs already linked to this installationId are marked connected
+            const linked = await this.databaseService.integration.findMany({
                 where: {
-                    organizationId: provider.organizationId,
                     type: ExternalProvider.GITHUB,
-                    status: IntegrationStatus.NOT_CONNECTED,
-                }
+                    externalAccountId: installationId,
+                },
+                select: { id: true, organizationId: true },
             });
 
-            if (integration) {
-                await this.databaseService.integration.update({
+            if (linked.length > 0) {
+                await this.databaseService.integration.updateMany({
                     where: {
-                        id: integration.id
+                        type: ExternalProvider.GITHUB,
+                        externalAccountId: installationId,
                     },
                     data: {
                         status: IntegrationStatus.CONNECTED,
-                        externalAccountId: id,
-                        externalAccount: String(payload.installation.account.login),
+                        externalAccount: accountLogin ?? undefined,
                     },
                 });
+
+                const orgIds = Array.from(new Set(linked.map((l) => l.organizationId)));
+                await Promise.all(orgIds.map((orgId) => this.invalidateOrgIntegrationStatusCachesForGithubIdentity(orgId)));
             }
         }
 
         if (payload.action === 'deleted') {
-            const integration = await this.databaseService.integration.findFirst({
+            const linked = await this.databaseService.integration.findMany({
                 where: {
-                    organizationId: provider.organizationId,
                     type: ExternalProvider.GITHUB,
-                    externalAccountId: id,
-                }
+                    externalAccountId: installationId,
+                },
+                select: { organizationId: true },
             });
 
-            if (integration) {
-                await this.databaseService.integration.updateMany({
-                    where: {
-                        organizationId: provider.organizationId,
-                        type: ExternalProvider.GITHUB,
-                        externalAccountId: id,
-                    },
-                    data: {
-                        status: IntegrationStatus.NOT_CONNECTED,
-                        externalAccountId: null,
-                        config: {},
-                    },
-                });
-            }
+            await this.databaseService.integration.updateMany({
+                where: {
+                    type: ExternalProvider.GITHUB,
+                    externalAccountId: installationId,
+                },
+                data: {
+                    status: IntegrationStatus.NOT_CONNECTED,
+                    externalAccountId: null,
+                    externalAccount: null,
+                    config: {},
+                },
+            });
+
+            const orgIds = Array.from(new Set(linked.map((l) => l.organizationId)));
+            await Promise.all(orgIds.map((orgId) => this.invalidateOrgIntegrationStatusCachesForGithubIdentity(orgId)));
         }
     }
 
@@ -412,6 +543,9 @@ export class GithubService {
         if (!integration) return;
 
         console.log(integration);
+
+        // Repo changes can affect what the frontend shows; invalidate org integration cache
+        await this.invalidateOrgIntegrationStatusCacheByOrgId(integration.organizationId);
 
         // for (const repo of payload.repositories_added || []) {
         //     await this.databaseService.integrationResource.upsert({

@@ -159,24 +159,20 @@ export class OrganizationsService {
         const key = `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${slug}`
         const cachedIntegrations = await this.redisService.get(key);
         if (cachedIntegrations) {
-            return {
-                integrations: JSON.parse(cachedIntegrations)
-            }
+            // Return cached array as-is
+            return JSON.parse(cachedIntegrations);
         }
 
         const organization = await this.databaseService.organization.findUnique({
             where: { slug, ownerId: userId },
             include: {
-                integrations: true
+                integrations: true,
+                providers: true
             }
         });
-        if (!organization) return null;
+        if (!organization) return [];
 
-        const integrations = organization.integrations.map((integration) => ({
-            app: integration.type,
-            authType: integration.authType,
-            status: integration.status,
-        }));
+        const integrations = await this.buildIntegrationStatusEntries(organization);
 
         await this.redisService.set(
             key,
@@ -184,7 +180,330 @@ export class OrganizationsService {
             60 * 60
         )
 
-        return { integrations }
+        // Return a flat array of integration status objects
+        return integrations;
+    }
+
+    private async buildIntegrationStatusEntries(organization: any, onlyIntegrationId?: string) {
+        const twoStepIntegrations: ExternalProvider[] = [ExternalProvider.GITHUB];
+
+        const orgGithubProvider = organization.providers?.find(
+            (p: any) => p.provider === ExternalProvider.GITHUB && p.organizationId === organization.id
+        );
+
+        // Pre-compute auto-connect candidates (only relevant when org has GitHub OAuth connected)
+        let githubAutoConnectCandidates: any[] = [];
+        if (orgGithubProvider?.providerUserId) {
+            const otherOrgs = await this.databaseService.organization.findMany({
+                where: {
+                    ownerId: organization.ownerId,
+                    id: { not: organization.id },
+                    providers: {
+                        some: {
+                            provider: ExternalProvider.GITHUB,
+                            providerUserId: orgGithubProvider.providerUserId,
+                        },
+                    },
+                    integrations: {
+                        some: {
+                            type: ExternalProvider.GITHUB,
+                            status: IntegrationStatus.CONNECTED,
+                        },
+                    },
+                },
+                select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                    providers: {
+                        where: { provider: ExternalProvider.GITHUB },
+                        select: { providerUserId: true, identifier: true },
+                        take: 1,
+                    },
+                    integrations: {
+                        where: { type: ExternalProvider.GITHUB },
+                        select: {
+                            id: true,
+                            status: true,
+                            externalAccountId: true,
+                            externalAccount: true,
+                        },
+                        take: 1,
+                    },
+                },
+            });
+
+            githubAutoConnectCandidates = otherOrgs
+                .filter((o) => o.integrations?.[0]?.externalAccountId)
+                .map((o) => ({
+                    orgId: o.id,
+                    orgSlug: o.slug,
+                    orgName: o.name,
+                    integrationId: o.integrations?.[0]?.id,
+                    status: o.integrations?.[0]?.status,
+                    externalAccountId: o.integrations?.[0]?.externalAccountId,
+                    externalAccount: o.integrations?.[0]?.externalAccount,
+                    oauthAccount: o.providers?.[0]
+                        ? {
+                            providerUserId: o.providers[0].providerUserId,
+                            identifier: o.providers[0].identifier,
+                        }
+                        : null,
+                }));
+        }
+
+        const integrations = (organization.integrations || [])
+            .filter((i: any) => !onlyIntegrationId || i.id === onlyIntegrationId)
+            .map((integration: any) => {
+                const baseData: any = {
+                    app: integration.type,
+                    authType: integration.authType,
+                    status: integration.status,
+                    integrationId: integration.id,
+                    externalAccountId: integration.externalAccountId,
+                    externalAccount: integration.externalAccount,
+                };
+
+                if (twoStepIntegrations.includes(integration.type as ExternalProvider)) {
+                    const provider = organization.providers.find(
+                        (p: any) => p.provider === integration.type && p.organizationId === organization.id
+                    );
+
+                    baseData.oauthStatus = provider ? 'CONNECTED' : 'NOT_CONNECTED';
+                    baseData.oauthConnectedAt = provider?.createdAt || null;
+                    baseData.oauthAccount = provider ? {
+                        identifier: provider.identifier,
+                        providerUserId: provider.providerUserId,
+                    } : null;
+
+                    const isNotConnected =
+                        integration.status === IntegrationStatus.NOT_CONNECTED &&
+                        !integration.externalAccountId;
+
+                    baseData.canAutoConnect = !!provider && isNotConnected && githubAutoConnectCandidates.length > 0;
+                    baseData.autoConnectCandidates = baseData.canAutoConnect ? githubAutoConnectCandidates : [];
+
+                    if (!provider && integration.status === IntegrationStatus.NOT_CONNECTED) {
+                        baseData.statusMessage = 'OAuth not connected';
+                    } else if (provider && integration.status === IntegrationStatus.NOT_CONNECTED && !integration.externalAccountId) {
+                        baseData.statusMessage =
+                            baseData.canAutoConnect
+                                ? 'OAuth connected, app already installed in another org'
+                                : 'OAuth connected, installation pending';
+                    } else if (provider && integration.status === IntegrationStatus.PROCESSING) {
+                        baseData.statusMessage = 'OAuth connected, installation processing';
+                    } else if (provider && integration.status === IntegrationStatus.CONNECTED) {
+                        baseData.statusMessage = 'Fully connected';
+                    } else {
+                        baseData.statusMessage = integration.status === IntegrationStatus.CONNECTED
+                            ? 'Connected'
+                            : integration.status === IntegrationStatus.PROCESSING
+                                ? 'Processing'
+                                : 'Not connected';
+                    }
+                } else {
+                    baseData.statusMessage = integration.status === IntegrationStatus.CONNECTED
+                        ? 'Connected'
+                        : integration.status === IntegrationStatus.PROCESSING
+                            ? 'Processing'
+                            : 'Not connected';
+                }
+
+                if (integration.config) {
+                    baseData.config = integration.config;
+                }
+
+                return baseData;
+            });
+
+        return integrations;
+    }
+
+    async listIntegrationsByOrgId(userId: string, orgId: string) {
+        // Check if user has access to this organization (owner or member)
+        const organization = await this.databaseService.organization.findFirst({
+            where: {
+                id: orgId,
+                OR: [
+                    { ownerId: userId },
+                    {
+                        members: {
+                            some: {
+                                userId,
+                                status: OrgMemberStatus.ACTIVE
+                            }
+                        }
+                    }
+                ]
+            },
+            include: {
+                integrations: true,
+                providers: true
+            }
+        });
+
+        if (!organization) {
+            throw new NotFoundException('Organization not found or access denied');
+        }
+
+        // Use the same logic as integrationStatus but with orgId
+        const key = `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${organization.slug}`;
+        const cachedIntegrations = await this.redisService.get(key);
+        if (cachedIntegrations) {
+            return JSON.parse(cachedIntegrations);
+        }
+
+        const integrations = await this.buildIntegrationStatusEntries(organization);
+
+        await this.redisService.set(
+            key,
+            JSON.stringify(integrations),
+            60 * 60
+        );
+
+        return integrations;
+    }
+
+    async getIntegrationStatusById(userId: string, orgId: string, integrationId: string) {
+        // Check if user has access to this organization (owner or member)
+        const organization = await this.databaseService.organization.findFirst({
+            where: {
+                id: orgId,
+                OR: [
+                    { ownerId: userId },
+                    {
+                        members: {
+                            some: {
+                                userId,
+                                status: OrgMemberStatus.ACTIVE
+                            }
+                        }
+                    }
+                ]
+            },
+            include: {
+                integrations: {
+                    where: { id: integrationId }
+                },
+                providers: true
+            }
+        });
+
+        if (!organization) {
+            throw new NotFoundException('Organization not found or access denied');
+        }
+
+        const integration = organization.integrations[0];
+        if (!integration) {
+            throw new NotFoundException('Integration not found');
+        }
+
+        const entries = await this.buildIntegrationStatusEntries(organization, integrationId);
+        return entries[0];
+    }
+
+    async githubAutoConnect(userId: string, orgId: string, sourceOrgId: string) {
+        const [destOrg, srcOrg] = await Promise.all([
+            this.databaseService.organization.findFirst({
+                where: {
+                    id: orgId,
+                    OR: [
+                        { ownerId: userId },
+                        {
+                            members: {
+                                some: {
+                                    userId,
+                                    status: OrgMemberStatus.ACTIVE
+                                }
+                            }
+                        }
+                    ]
+                },
+                include: {
+                    providers: { where: { provider: ExternalProvider.GITHUB } },
+                    integrations: { where: { type: ExternalProvider.GITHUB } },
+                }
+            }),
+            this.databaseService.organization.findUnique({
+                where: { id: sourceOrgId },
+                include: {
+                    providers: { where: { provider: ExternalProvider.GITHUB } },
+                    integrations: { where: { type: ExternalProvider.GITHUB } },
+                }
+            })
+        ]);
+
+        if (!destOrg) throw new NotFoundException('Organization not found or access denied');
+        if (!srcOrg) throw new NotFoundException('Source organization not found');
+        if (destOrg.ownerId !== srcOrg.ownerId) {
+            throw new BadRequestException('Source org must have same owner');
+        }
+
+        const destProvider = destOrg.providers?.[0];
+        const srcProvider = srcOrg.providers?.[0];
+        if (!destProvider || !srcProvider) {
+            throw new BadRequestException('GitHub OAuth must be connected on both orgs');
+        }
+        if (destProvider.providerUserId !== srcProvider.providerUserId) {
+            throw new BadRequestException('GitHub OAuth identity must match');
+        }
+
+        const srcIntegration = srcOrg.integrations?.[0];
+        if (!srcIntegration?.externalAccountId || srcIntegration.status !== IntegrationStatus.CONNECTED) {
+            throw new BadRequestException('Source org GitHub app is not installed');
+        }
+
+        const destIntegration = destOrg.integrations?.[0];
+        if (!destIntegration) {
+            throw new NotFoundException('Destination GitHub integration not found');
+        }
+
+        const destConfig = (destIntegration.config || {}) as any;
+        delete destConfig.token;
+        delete destConfig.expiresAt;
+
+        const updated = await this.databaseService.integration.update({
+            where: { id: destIntegration.id },
+            data: {
+                status: IntegrationStatus.CONNECTED,
+                externalAccountId: srcIntegration.externalAccountId,
+                externalAccount: srcIntegration.externalAccount,
+                config: destConfig,
+            }
+        });
+
+        // Invalidate caches for all orgs under this owner+github identity (best-effort)
+        const orgsToInvalidate = await this.databaseService.organization.findMany({
+            where: {
+                ownerId: destOrg.ownerId,
+                providers: {
+                    some: {
+                        provider: ExternalProvider.GITHUB,
+                        providerUserId: destProvider.providerUserId,
+                    }
+                }
+            },
+            select: { slug: true },
+        });
+        const keys = orgsToInvalidate
+            .map((o) => o.slug)
+            .filter(Boolean)
+            .map((slug) => `${REDIS_ORG_APP_INTEGRATION_STATUS_KEY_PREFIX}-${slug}`);
+        if (keys.length > 0) {
+            await this.redisService.del(...keys);
+        }
+
+        return {
+            message: 'GitHub auto-connect successful',
+            integration: updated,
+            source: {
+                orgId: srcOrg.id,
+                orgSlug: srcOrg.slug,
+                integrationId: srcIntegration.id,
+                externalAccountId: srcIntegration.externalAccountId,
+                externalAccount: srcIntegration.externalAccount,
+            }
+        };
     }
 
     async updateOrg(orgId: string, userId: string, data: { name?: string }) {

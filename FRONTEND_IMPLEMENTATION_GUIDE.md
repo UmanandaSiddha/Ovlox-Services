@@ -994,6 +994,9 @@ All providers follow similar patterns. Provider-specific endpoints are documente
 
 **Description**: Get GitHub OAuth URL for organization
 
+**Query Params**:
+- `force` (optional): `true|false` — when `true`, forces re-auth to connect a different GitHub account (replaces existing GitHub Provider for this org).
+
 **Response**:
 ```typescript
 {
@@ -1033,7 +1036,10 @@ All providers follow similar patterns. Provider-specific endpoints are documente
 #### 3. GitHub Callback
 **GET** `/integrations/github/callback`
 
-**Description**: OAuth callback (handled automatically, redirects to frontend)
+**Description**: OAuth + installation callback (handled automatically, redirects to frontend)
+
+**Notes**:
+- If `installation_id` is present, backend updates the org’s GitHub `Integration` immediately (does not rely solely on the webhook), then redirects.
 
 **Query Parameters**: `code`, `state`, `installation_id`, `setup_action`
 
@@ -1121,6 +1127,57 @@ All providers follow similar patterns. Provider-specific endpoints are documente
 {
   url: string;
 }
+
+---
+
+### Organization Integrations (Status)
+
+#### List integrations for an org (HTTP)
+**GET** `/orgs/:orgId/integrations`
+
+**Description**: HTTP version of the integration status list (same data shape as SSE payload).
+
+**Response**: `IIntegration[]` (array)
+
+**GitHub additional fields** (only for 2-step providers):
+- `oauthStatus`: `CONNECTED|NOT_CONNECTED`
+- `oauthConnectedAt`: ISO date or null
+- `oauthAccount`: `{ identifier, providerUserId } | null`
+- `canAutoConnect`: boolean
+- `autoConnectCandidates`: array of:
+  - `{ orgId, orgSlug, orgName, integrationId, status, externalAccountId, externalAccount, oauthAccount }`
+
+#### Get single integration status (HTTP)
+**GET** `/orgs/:orgId/integrations/:integrationId`
+
+**Description**: Get status for a single integration in an org.
+
+**Response**: `IIntegration` (object)
+
+#### Org integrations status stream (SSE)
+**GET (SSE)** `/orgs/integrations/status/:slug`
+
+**Description**: SSE stream that emits `{ data: IIntegration[] }` every ~5 seconds.
+
+---
+
+### GitHub Auto-Connect (reuse an existing installation)
+
+#### Auto-connect GitHub using an installation from another org
+**POST** `/orgs/:orgId/integrations/github/auto-connect`
+
+**Body**:
+```json
+{
+  "sourceOrgId": "uuid"
+}
+```
+
+**Behavior**:
+- Allowed only when destination org and source org have:
+  - same `ownerId`
+  - same GitHub OAuth identity (`Provider.providerUserId` matches)
+- Copies `externalAccountId/externalAccount` from source org’s GitHub integration into destination org’s GitHub integration.
 ```
 
 **UX Notes**:

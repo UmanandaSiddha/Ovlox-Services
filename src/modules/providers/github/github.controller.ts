@@ -15,8 +15,8 @@ export class GithubController {
 
     @UseGuards(AuthGuard)
     @Get('oauth/:id')
-    getOauthUrl(@Param('id') orgId: string) {
-        return this.githubService.getOAuthUrl(orgId);
+    getOauthUrl(@Param('id') orgId: string, @Query('force') force?: string) {
+        return this.githubService.getOAuthUrl(orgId, force === 'true');
     }
 
     @UseGuards(AuthGuard)
@@ -49,8 +49,9 @@ export class GithubController {
 
             const { orgId, integrationId } = JSON.parse(payload);
 
-            // The installation webhook will handle updating the integration
-            // This callback just confirms the installation was completed
+            // Update integration immediately so the system works even if webhook doesn't fire
+            await this.githubService.handleInstallationCallback(orgId, integrationId, installation_id);
+
             // Redirect to frontend
             return `<script>window.location.href = '${FRONTEND_URL}/integrations?status=installed&installation_id=${installation_id}'</script>`;
         }
@@ -59,9 +60,9 @@ export class GithubController {
         const payload = verifyState(INTEGRATION_TOKEN_ENCRYPTION_KEY, state || '');
         if (!payload) throw new HttpException('Invalid state', HttpStatus.BAD_REQUEST);
 
-        const { orgId } = JSON.parse(payload);
+        const { orgId, replace } = JSON.parse(payload);
 
-        await this.githubService.handleOAuthCallback(code, orgId);
+        await this.githubService.handleOAuthCallback(code, orgId, !!replace);
 
         return `<script>window.location.href = '${FRONTEND_URL}/integrations?status=connected'</script>`;
     }

@@ -147,6 +147,25 @@ export class RedisHealthService {
         }
     }
 
+    async flushRedisCaches() {
+        try {
+            const result = await this.redisClient.flushall();
+
+            return {
+                timestamp: new Date().toISOString(),
+                status: 'flushed',
+                result,
+            };
+        } catch (error) {
+            this.logger.error('Redis cache flush failed', error);
+            return {
+                timestamp: new Date().toISOString(),
+                status: 'error',
+                error: error.message,
+            };
+        }
+    }
+
     private async flushQueue(queue: Queue, name: string) {
         try {
             // Clear waiting/delayed jobs
