@@ -333,7 +333,7 @@ export class GithubService {
         return results;
     }
 
-    async syncRepositories(integrationId: string) {
+    async getProjectRepositories(integrationId: string, projectId: string) {
         const integration = await this.databaseService.integration.findUnique({
             where: { id: integrationId },
         });
@@ -342,10 +342,118 @@ export class GithubService {
             throw new NotFoundException(`Integration ${integrationId} not found`);
         }
 
-        const repos = await this.fetchInstallationRepos(integrationId);
+        // Get the integration connection for this project
+        const connection = await this.databaseService.integrationConnection.findFirst({
+            where: {
+                projectId,
+                integrationId,
+            },
+        });
+
+        if (!connection) {
+            return {
+                projectId,
+                integrationId,
+                repositories: [],
+                message: 'No integration connection found for this project'
+            };
+        }
+
+        const items = connection.items as { repositories?: string[] } | null;
+        const linkedRepoNames = items?.repositories || [];
+
+        if (linkedRepoNames.length === 0) {
+            return {
+                projectId,
+                integrationId,
+                repositories: [],
+                message: 'No repositories linked to this project'
+            };
+        }
+
+        // Fetch full repo details from GitHub for the linked repos
+        const allRepos = await this.fetchInstallationRepos(integrationId);
+        const linkedRepos = allRepos.filter((repo: any) => linkedRepoNames.includes(repo.name));
+
+        // Include any repos that are linked but not accessible (permissions changed)
+        const accessibleRepoNames = linkedRepos.map((r: any) => r.name);
+        const inaccessibleRepos = linkedRepoNames
+            .filter(name => !accessibleRepoNames.includes(name))
+            .map(name => ({
+                id: null,
+                name,
+                url: `https://github.com/${name}`,
+                updated_at: null,
+                pushed_at: null,
+                accessible: false
+            }));
+
+        return {
+            projectId,
+            integrationId,
+            connectionId: connection.id,
+            repositories: [
+                ...linkedRepos.map((r: any) => ({ ...r, accessible: true })),
+                ...inaccessibleRepos
+            ]
+        };
+    }
+
+    async syncRepositories(integrationId: string, projectId?: string) {
+        const integration = await this.databaseService.integration.findUnique({
+            where: { id: integrationId },
+        });
+
+        if (!integration) {
+            throw new NotFoundException(`Integration ${integrationId} not found`);
+        }
+
+        // Fetch all repos from the GitHub installation
+        const allRepos = await this.fetchInstallationRepos(integrationId);
+
+        let reposToSync = allRepos;
+        let connection: any = null;
+
+        // If projectId provided, filter to only project-specific repos
+        if (projectId) {
+            connection = await this.databaseService.integrationConnection.findFirst({
+                where: {
+                    projectId,
+                    integrationId,
+                },
+            });
+
+            if (!connection) {
+                throw new NotFoundException(`No integration connection found for project ${projectId}`);
+            }
+
+            const items = connection.items as { repositories?: string[] } | null;
+            const projectRepoNames = items?.repositories || [];
+
+            if (projectRepoNames.length === 0) {
+                return { 
+                    synced: 0, 
+                    repositories: [],
+                    message: 'No repositories configured for this project. Link repositories first.'
+                };
+            }
+
+            // Filter repos to only those linked to this project
+            reposToSync = allRepos.filter((repo: any) => 
+                projectRepoNames.includes(repo.name)
+            );
+
+            if (reposToSync.length === 0) {
+                return { 
+                    synced: 0, 
+                    repositories: [],
+                    message: 'None of the configured repositories are accessible. Check GitHub App permissions.'
+                };
+            }
+        }
 
         // Sync repos to IntegrationResource
-        for (const repo of repos) {
+        for (const repo of reposToSync) {
             await this.databaseService.integrationResource.upsert({
                 where: {
                     uq_integration_resource_provider: {
@@ -361,6 +469,7 @@ export class GithubService {
                         updated_at: repo.updated_at,
                         pushed_at: repo.pushed_at,
                     },
+                    connectionId: connection?.id || undefined,
                 },
                 create: {
                     integrationId: integration.id,
@@ -372,11 +481,16 @@ export class GithubService {
                         updated_at: repo.updated_at,
                         pushed_at: repo.pushed_at,
                     },
+                    connectionId: connection?.id || undefined,
                 },
             });
         }
 
-        return { synced: repos.length, repositories: repos };
+        return { 
+            synced: reposToSync.length, 
+            repositories: reposToSync,
+            projectId: projectId || null
+        };
     }
 
     async getValidInstallationToken(integrationId: string) {
@@ -935,7 +1049,7 @@ export class GithubService {
 
     // Test Services
 
-    private async resolveGithubContext(integrationId: string) {
+    private async resolveGithubContext(integrationId: string, repoFullName?: string, projectId?: string) {
         const integration = await this.databaseService.integration.findUnique({
             where: { id: integrationId },
         });
@@ -944,13 +1058,74 @@ export class GithubService {
             throw new BadRequestException("Invalid GitHub integration");
         }
 
-        // const { owner, repo } = integration.config as {
-        //     owner: string;
-        //     repo: string;
-        // };
+        let owner: string;
+        let repo: string;
 
-        const owner = "UmanandaSiddha";
-        const repo = "Ghibli-Portfolio";
+        if (repoFullName) {
+            // Parse owner/repo from full name (e.g., "owner/repo")
+            const parts = repoFullName.split('/');
+            if (parts.length !== 2) {
+                throw new BadRequestException("Invalid repository format. Expected 'owner/repo'");
+            }
+            [owner, repo] = parts;
+
+            // If projectId provided, verify the repo is linked to this project
+            if (projectId) {
+                const connection = await this.databaseService.integrationConnection.findFirst({
+                    where: { projectId, integrationId },
+                });
+                const items = connection?.items as { repositories?: string[] } | null;
+                const projectRepos = items?.repositories || [];
+                if (!projectRepos.includes(repoFullName)) {
+                    throw new BadRequestException("Repository is not linked to this project");
+                }
+            }
+        } else if (projectId) {
+            // Get first repo from project's linked repositories
+            const connection = await this.databaseService.integrationConnection.findFirst({
+                where: { projectId, integrationId },
+            });
+
+            if (!connection) {
+                throw new BadRequestException("No integration connection found for this project");
+            }
+
+            const items = connection.items as { repositories?: string[] } | null;
+            const projectRepos = items?.repositories || [];
+
+            if (projectRepos.length === 0) {
+                throw new BadRequestException("No repositories linked to this project. Link repositories first.");
+            }
+
+            // Use the first linked repo
+            const firstRepo = projectRepos[0];
+            const parts = firstRepo.split('/');
+            if (parts.length !== 2) {
+                throw new BadRequestException("Invalid repository format in project configuration");
+            }
+            [owner, repo] = parts;
+        } else {
+            // Get the first synced repository from IntegrationResource
+            const resource = await this.databaseService.integrationResource.findFirst({
+                where: {
+                    integrationId: integration.id,
+                    provider: ExternalProvider.GITHUB,
+                },
+                orderBy: {
+                    updatedAt: 'desc',
+                },
+            });
+
+            if (!resource || !resource.name) {
+                throw new BadRequestException("No repositories synced. Please sync repositories first.");
+            }
+
+            const parts = resource.name.split('/');
+            if (parts.length !== 2) {
+                throw new BadRequestException("Invalid repository format in database. Expected 'owner/repo'");
+            }
+            [owner, repo] = parts;
+        }
 
         if (!owner || !repo) {
             throw new BadRequestException("Repo not configured for integration");
@@ -968,8 +1143,8 @@ export class GithubService {
             : patch;
     }
 
-    async getGithubOverview(integrationId: string) {
-        const { token, owner, repo } = await this.resolveGithubContext(integrationId);
+    async getGithubOverview(integrationId: string, repoFullName?: string, projectId?: string) {
+        const { token, owner, repo } = await this.resolveGithubContext(integrationId, repoFullName, projectId);
 
         const headers = {
             Authorization: `token ${token}`,
@@ -1011,9 +1186,9 @@ export class GithubService {
         };
     }
 
-    async getGithubCommits(integrationId: string, limit = 5) {
+    async getGithubCommits(integrationId: string, limit = 5, repoFullName?: string, projectId?: string) {
         const { token, owner, repo } =
-            await this.resolveGithubContext(integrationId);
+            await this.resolveGithubContext(integrationId, repoFullName, projectId);
 
         const headers = {
             Authorization: `token ${token}`,
@@ -1051,10 +1226,12 @@ export class GithubService {
 
     async getGithubCommitDetail(
         integrationId: string,
-        sha: string
+        sha: string,
+        repoFullName?: string,
+        projectId?: string
     ) {
         const { token, owner, repo } =
-            await this.resolveGithubContext(integrationId);
+            await this.resolveGithubContext(integrationId, repoFullName, projectId);
 
         const headers = {
             Authorization: `token ${token}`,
@@ -1144,9 +1321,9 @@ export class GithubService {
         };
     }
 
-    async getGithubPullRequests(integrationId: string, limit = 5) {
+    async getGithubPullRequests(integrationId: string, limit = 5, repoFullName?: string, projectId?: string) {
         const { token, owner, repo } =
-            await this.resolveGithubContext(integrationId);
+            await this.resolveGithubContext(integrationId, repoFullName, projectId);
 
         const headers = {
             Authorization: `token ${token}`,
@@ -1190,9 +1367,9 @@ export class GithubService {
         };
     }
 
-    async getGithubIssues(integrationId: string, limit = 5) {
+    async getGithubIssues(integrationId: string, limit = 5, repoFullName?: string, projectId?: string) {
         const { token, owner, repo } =
-            await this.resolveGithubContext(integrationId);
+            await this.resolveGithubContext(integrationId, repoFullName, projectId);
 
         const headers = {
             Authorization: `token ${token}`,
@@ -1222,9 +1399,11 @@ export class GithubService {
 
     async debugGithubCommit(
         integrationId: string,
-        sha: string
+        sha: string,
+        repoFullName?: string,
+        projectId?: string
     ): Promise<DebugFixResponse> {
-        const detail = await this.getGithubCommitDetail(integrationId, sha);
+        const detail = await this.getGithubCommitDetail(integrationId, sha, repoFullName, projectId);
 
         if (!detail.security.canAutoFix) {
             throw new BadRequestException("No auto-fixable security issues");

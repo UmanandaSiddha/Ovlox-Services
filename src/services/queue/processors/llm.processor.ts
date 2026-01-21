@@ -178,6 +178,7 @@ export class LLMProcessor extends WorkerHost {
             userId,
             projectId: actualProjectId,
             organizationId,
+            userMessageId,
         });
 
         // Fetch the assistant message with full relations

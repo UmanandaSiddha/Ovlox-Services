@@ -153,7 +153,7 @@ export class LlmController {
     async getMessages(
         @Param('id') conversationId: string,
         @getUser('id') userId: string,
-        @Query('limit') limit: number = 50,
+        @Query('limit') limitStr?: string,
         @Query('before') before?: string
     ) {
         // Verify user is participant
@@ -170,16 +170,37 @@ export class LlmController {
             throw new BadRequestException('Conversation not found or access denied');
         }
 
+        // Parse limit with default value
+        const limit = limitStr ? Math.min(parseInt(limitStr, 10) || 50, 100) : 50;
+
         const messages = await this.databaseService.chatMessage.findMany({
             where: {
                 conversationId,
                 ...(before ? { id: { lt: before } } : {}),
             },
             orderBy: { createdAt: 'desc' },
-            take: Math.min(limit, 100),
+            take: limit,
             include: {
-                sender: true,
-                senderMember: true,
+                sender: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        avatarUrl: true,
+                    },
+                },
+                senderMember: {
+                    include: {
+                        user: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                                avatarUrl: true,
+                            },
+                        },
+                    },
+                },
                 sources: {
                     include: {
                         rawEvent: true,

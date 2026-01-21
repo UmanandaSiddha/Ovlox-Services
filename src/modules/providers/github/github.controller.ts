@@ -87,44 +87,82 @@ export class GithubController {
     }
 
     @UseGuards(AuthGuard)
+    @Get('repo/:id/project/:projectId')
+    getProjectRepositories(@Param('id') integrationId: string, @Param('projectId') projectId: string) {
+        return this.githubService.getProjectRepositories(integrationId, projectId);
+    }
+
+    @UseGuards(AuthGuard)
     @Post('sync-repos/:id')
-    async syncRepos(@Param('id') integrationId: string) {
-        return this.githubService.syncRepositories(integrationId);
+    async syncRepos(@Param('id') integrationId: string, @Query('projectId') projectId?: string) {
+        return this.githubService.syncRepositories(integrationId, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('overview/:id')
-    getRepoOverview(@Param('id') integrationId: string) {
-        return this.githubService.getGithubOverview(integrationId);
+    getRepoOverview(
+        @Param('id') integrationId: string, 
+        @Query('repo') repo?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        return this.githubService.getGithubOverview(integrationId, repo, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('commits/:id')
-    getCommits(@Param('id') integrationId: string) {
-        return this.githubService.getGithubCommits(integrationId, 10);
+    getCommits(
+        @Param('id') integrationId: string, 
+        @Query('repo') repo?: string, 
+        @Query('limit') limit?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        const limitNum = limit ? parseInt(limit, 10) : 10;
+        return this.githubService.getGithubCommits(integrationId, limitNum, repo, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('commit/details/:id/:sha')
-    getCommitDetails(@Param('id') integrationId: string, @Param('sha') sha: string) {
-        return this.githubService.getGithubCommitDetail(integrationId, sha);
+    getCommitDetails(
+        @Param('id') integrationId: string, 
+        @Param('sha') sha: string, 
+        @Query('repo') repo?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        return this.githubService.getGithubCommitDetail(integrationId, sha, repo, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('pull-requests/:id')
-    getPullRequests(@Param('id') integrationId: string) {
-        return this.githubService.getGithubPullRequests(integrationId, 10);
+    getPullRequests(
+        @Param('id') integrationId: string, 
+        @Query('repo') repo?: string, 
+        @Query('limit') limit?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        const limitNum = limit ? parseInt(limit, 10) : 10;
+        return this.githubService.getGithubPullRequests(integrationId, limitNum, repo, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('issues/:id')
-    getIssues(@Param('id') integrationId: string) {
-        return this.githubService.getGithubIssues(integrationId, 10);
+    getIssues(
+        @Param('id') integrationId: string, 
+        @Query('repo') repo?: string, 
+        @Query('limit') limit?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        const limitNum = limit ? parseInt(limit, 10) : 10;
+        return this.githubService.getGithubIssues(integrationId, limitNum, repo, projectId);
     }
 
     @UseGuards(AuthGuard)
     @Get('debug/:id/:sha')
-    debugCommit(@Param('id') integrationId: string, @Param('sha') sha: string) {
-        return this.githubService.debugGithubCommit(integrationId, sha);
+    debugCommit(
+        @Param('id') integrationId: string, 
+        @Param('sha') sha: string, 
+        @Query('repo') repo?: string,
+        @Query('projectId') projectId?: string
+    ) {
+        return this.githubService.debugGithubCommit(integrationId, sha, repo, projectId);
     }
 }

@@ -324,9 +324,13 @@ export class LlmService implements OnModuleInit {
 
         // 1. Estimate credits needed (use maxTokens for estimation)
         const estimatedCredits = this.calculateCredits(model, maxTokens, Math.floor(maxTokens * 0.5));
-        const hasCredits = await this.checkCreditBalance(organizationId, estimatedCredits);
-        if (!hasCredits) {
-            throw new BadRequestException('Insufficient credits for this operation');
+        
+        // Skip credit checks in development mode
+        if (!shouldSkipCreditChecks()) {
+            const hasCredits = await this.checkCreditBalance(organizationId, estimatedCredits);
+            if (!hasCredits) {
+                throw new BadRequestException('Insufficient credits for this operation');
+            }
         }
 
         // 2. Create LlmUsage record (PENDING status)
@@ -383,8 +387,10 @@ export class LlmService implements OnModuleInit {
                 },
             });
 
-            // 7. Atomically deduct credits
-            await this.deductCreditsAtomically(organizationId, actualCredits, llmUsage.id);
+            // 7. Atomically deduct credits (skip in development mode)
+            if (!shouldSkipCreditChecks()) {
+                await this.deductCreditsAtomically(organizationId, actualCredits, llmUsage.id);
+            }
 
             this.logger.log(
                 `LLM operation ${operationType} completed. Credits: ${actualCredits.toString()}, Tokens: ${totalTokens}`,
@@ -1454,7 +1460,8 @@ Return:
                 select: { creditsConsumed: true },
             });
 
-            if (updatedUsage && updatedUsage.creditsConsumed.gt(0)) {
+            // Skip credit deduction in development mode
+            if (updatedUsage && updatedUsage.creditsConsumed.gt(0) && !shouldSkipCreditChecks()) {
                 await this.deductCreditsAtomically(organizationId, updatedUsage.creditsConsumed, llmUsage.id);
             }
 
@@ -1494,12 +1501,14 @@ Return:
             throw new BadRequestException(`Organization mismatch for LlmOutput ${llmOutputId}`);
         }
 
-        // Check credits
+        // Check credits (skip in development mode)
         const estimatedTokens = Math.ceil(content.length / 4);
         const estimatedCredits = this.calculateCredits(this.embeddingModel, estimatedTokens, 0);
-        const hasCredits = await this.checkCreditBalance(actualOrganizationId, estimatedCredits);
-        if (!hasCredits) {
-            throw new BadRequestException('Insufficient credits for embedding generation');
+        if (!shouldSkipCreditChecks()) {
+            const hasCredits = await this.checkCreditBalance(actualOrganizationId, estimatedCredits);
+            if (!hasCredits) {
+                throw new BadRequestException('Insufficient credits for embedding generation');
+            }
         }
 
         // Create LlmUsage record
@@ -1558,7 +1567,8 @@ Return:
                 select: { creditsConsumed: true },
             });
 
-            if (totalCredits && totalCredits.creditsConsumed.gt(0)) {
+            // Skip credit deduction in development mode
+            if (totalCredits && totalCredits.creditsConsumed.gt(0) && !shouldSkipCreditChecks()) {
                 await this.deductCreditsAtomically(actualOrganizationId, totalCredits.creditsConsumed, llmUsage.id);
             }
 
@@ -1662,6 +1672,7 @@ Return:
     /**
      * Chat method - RAG-based chatbot with vector similarity search
      * Supports project-scoped, org-scoped, task team, and direct conversations
+     * Note: User message is created by the controller before calling this method
      */
     async chat(params: {
         conversationId: string;
@@ -1669,12 +1680,13 @@ Return:
         userId: string;
         projectId?: string;
         organizationId?: string;
+        userMessageId?: string; // Optional: ID of already-created user message
     }): Promise<{
         answer: string;
         chatMessageId: string;
         sources: Array<{ llmOutputId?: string; rawEventId?: string; relevanceScore: number }>;
     }> {
-        const { conversationId, question, userId, projectId, organizationId } = params;
+        const { conversationId, question, userId, projectId, organizationId, userMessageId } = params;
 
         // Get conversation to determine scope
         const conversation = await this.databaseService.conversation.findUnique({
@@ -1721,28 +1733,104 @@ Return:
             throw new BadRequestException('RAG chat requires a project context');
         }
 
-        // Create user message
-        const userMessage = await this.databaseService.chatMessage.create({
-            data: {
-                conversationId,
-                role: 'USER',
-                content: question,
-                senderId: userId,
-            },
-        });
-
         try {
-            // 1. Generate embedding for the question
-            const questionEmbedding = await this.generateEmbedding(question, this.embeddingModel);
+            // 1. Get project info for context
+            const project = await this.databaseService.project.findUnique({
+                where: { id: actualProjectId },
+                include: {
+                    integrations: {
+                        include: {
+                            integration: true,
+                        },
+                    },
+                },
+            });
 
-            // 2. Search for similar content using vector similarity
-            const similarContent = await this.searchSimilarContent(questionEmbedding, actualProjectId, 5, 0.7);
+            // 2. Try to generate embedding and search for similar content
+            let similarContent: Array<{ embeddingId: string; llmOutputId?: string; contentChunkId?: string; similarity: number; content: string }> = [];
+            try {
+                const questionEmbedding = await this.generateEmbedding(question, this.embeddingModel);
+                similarContent = await this.searchSimilarContent(questionEmbedding, actualProjectId, 10, 0.5);
+            } catch (embeddingError) {
+                this.logger.warn(`Embedding search failed: ${embeddingError.message}. Using fallback context.`, LlmService.name);
+            }
 
-            // 3. Build context from similar content
-            const context = similarContent
-                .map((item, index) => `[Source ${index + 1}] ${item.content}`)
-                .join('\n\n---\n\n')
-                .slice(0, 4000); // Limit context size
+            // 3. Build context - use embeddings if available, otherwise fetch recent data directly
+            let context = '';
+            
+            if (similarContent.length > 0) {
+                context = similarContent
+                    .map((item, index) => `[Source ${index + 1}] ${item.content}`)
+                    .join('\n\n---\n\n');
+            } else {
+                // Fallback: Fetch recent RawEvents and LlmOutputs directly
+                this.logger.log(`No embeddings found for project ${actualProjectId}. Using fallback context from RawEvents.`, LlmService.name);
+
+                const [recentRawEvents, recentLlmOutputs] = await Promise.all([
+                    this.databaseService.rawEvent.findMany({
+                        where: { projectId: actualProjectId },
+                        orderBy: { timestamp: 'desc' },
+                        take: 20,
+                        select: {
+                            id: true,
+                            eventType: true,
+                            content: true,
+                            authorName: true,
+                            timestamp: true,
+                            metadata: true,
+                        },
+                    }),
+                    this.databaseService.llmOutput.findMany({
+                        where: { projectId: actualProjectId },
+                        orderBy: { createdAt: 'desc' },
+                        take: 10,
+                        select: {
+                            id: true,
+                            type: true,
+                            content: true,
+                            createdAt: true,
+                        },
+                    }),
+                ]);
+
+                // Build context from raw events
+                if (recentRawEvents.length > 0) {
+                    const eventContext = recentRawEvents.map((event, i) => {
+                        const metadata = event.metadata as any;
+                        let summary = event.content || '';
+                        if (event.eventType === 'COMMIT') {
+                            summary = `Commit by ${event.authorName || 'unknown'}: ${event.content || metadata?.message || 'No message'}`;
+                        } else if (event.eventType === 'PULL_REQUEST') {
+                            summary = `PR: ${metadata?.title || event.content || 'No title'} - ${metadata?.action || 'updated'}`;
+                        } else if (event.eventType === 'ISSUE') {
+                            summary = `Issue: ${metadata?.title || event.content || 'No title'} - ${metadata?.action || 'updated'}`;
+                        }
+                        return `[Event ${i + 1}] ${event.eventType} (${new Date(event.timestamp).toLocaleDateString()}): ${summary}`;
+                    }).join('\n');
+                    context += `RECENT PROJECT ACTIVITY:\n${eventContext}\n\n`;
+                }
+
+                // Add LLM summaries if available
+                if (recentLlmOutputs.length > 0) {
+                    const summaryContext = recentLlmOutputs
+                        .filter(o => o.type === 'SUMMARY')
+                        .slice(0, 5)
+                        .map((o, i) => `[Summary ${i + 1}] ${o.content}`)
+                        .join('\n');
+                    if (summaryContext) {
+                        context += `AI-GENERATED SUMMARIES:\n${summaryContext}\n\n`;
+                    }
+                }
+
+                // If still no context, add project info
+                if (!context) {
+                    context = 'No recent activity data available for this project yet.';
+                }
+            }
+
+            // Add project metadata to context
+            const projectInfo = `PROJECT: ${project?.name || 'Unknown'}
+INTEGRATIONS: ${project?.integrations?.map(ic => ic.integration.type).join(', ') || 'None'}`;
 
             // 4. Get recent conversation history (last 10 messages for context)
             const recentMessages = await this.databaseService.chatMessage.findMany({
@@ -1760,19 +1848,22 @@ Return:
 
             // 5. Generate answer using LLM with RAG context
             const systemPrompt = `You are a helpful AI assistant answering questions about a software project.
-Use the provided context to answer accurately. Cite sources when relevant.
-If the context doesn't contain enough information, say so clearly.
+You have access to the project's recent activity including commits, pull requests, issues, and AI-generated summaries.
+Use the provided context to answer accurately. Cite specific events or sources when relevant.
+If specific information isn't available, summarize what you know about the project's recent activity.
 Keep answers concise and actionable.`;
 
-            const userPrompt = `CONVERSATION HISTORY:
+            const userPrompt = `${projectInfo}
+
+CONVERSATION HISTORY:
 ${conversationHistory}
 
-RELEVANT PROJECT CONTEXT:
-${context}
+PROJECT CONTEXT:
+${context.slice(0, 4000)}
 
 USER QUESTION: ${question}
 
-Provide a clear, concise answer based on the context. Reference sources when relevant.`;
+Provide a helpful answer based on the available project context.`;
 
             const { result: answer } = await this.executeLlmOperation<string>({
                 organizationId: actualOrganizationId,
@@ -1837,11 +1928,8 @@ Provide a clear, concise answer based on the context. Reference sources when rel
                 data: { updatedAt: new Date() },
             });
 
-            // 9. Generate embedding for the question and answer (for future retrieval)
-            // This is done asynchronously to not block the response
-            this.generateEmbeddingForRawEvent(`chat_${conversationId}_${userMessage.id}`, actualOrganizationId, question).catch(
-                (err) => this.logger.warn(`Failed to generate embedding for chat question: ${err.message}`, LlmService.name)
-            );
+            // Note: Chat message embeddings are not stored as they're conversation-specific
+            // Future: Could implement chat message indexing for search within conversations
 
             this.logger.log(`Chat response generated for conversation ${conversationId}`, LlmService.name);
 
